@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HealthIT Copilot — HL7 v2 ↔ FHIR mapping inside Claude Code</title>
+<meta name="description" content="HealthIT Copilot is a Claude Code plugin for healthcare integration engineers: HL7 v2 to FHIR R4 mapping, FHIR validation, and interface debugging with deterministic tools.">
+<meta property="og:title" content="HealthIT Copilot — HL7 v2 ↔ FHIR mapping inside Claude Code">
+<meta property="og:description" content="Deterministic HL7 v2 → FHIR R4 mapping, FHIR validation, and interface debugging for health-IT integration engineers.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://sinteco.github.io/healthit-copilot/">
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #9da7b3;
+    --accent: #4dd0a5;
+    --accent2: #79b8ff;
+    --warn: #f0b429;
+    --danger-bg: #2b1d0e;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 0 1.25rem; }
+  section { padding: 3.5rem 0; }
+  h1, h2, h3 { line-height: 1.25; }
+  h2 { font-size: 1.6rem; margin-bottom: 1rem; }
+  h2 .hash { color: var(--accent); margin-right: .4rem; }
+  p { color: var(--muted); }
+  a { color: var(--accent2); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code, pre { font-family: var(--mono); }
+
+  /* Hero */
+  .hero { padding: 5rem 0 4rem; text-align: center;
+          background: radial-gradient(ellipse 80% 60% at 50% -10%, #1a2f2a 0%, var(--bg) 70%); }
+  .hero .badge { display: inline-block; font-family: var(--mono); font-size: .78rem;
+                 color: var(--accent); border: 1px solid var(--accent); border-radius: 999px;
+                 padding: .2rem .8rem; margin-bottom: 1.4rem; letter-spacing: .04em; }
+  .hero h1 { font-size: clamp(2.1rem, 5.5vw, 3.4rem); letter-spacing: -.02em; }
+  .hero h1 .hl { color: var(--accent); }
+  .hero .tagline { font-size: clamp(1.05rem, 2.4vw, 1.35rem); color: var(--text);
+                   margin: 1rem auto .5rem; max-width: 44rem; font-weight: 500; }
+  .hero .who { max-width: 40rem; margin: 0 auto 2.2rem; }
+  .installs { max-width: 34rem; margin: 0 auto; text-align: left; }
+  .installs .step { font-size: .8rem; color: var(--muted); font-family: var(--mono);
+                    margin: .9rem 0 .25rem; }
+  .cmd { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+         padding: .8rem 1rem; overflow-x: auto; }
+  .cmd code { color: var(--accent); font-size: .92rem; white-space: pre; }
+
+  /* Before/After */
+  .demo-grid { display: grid; grid-template-columns: 1fr auto 1fr; gap: 1rem; align-items: stretch; }
+  .arrow { display: flex; align-items: center; justify-content: center;
+           color: var(--accent); font-size: 1.8rem; font-family: var(--mono); }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+           overflow: hidden; display: flex; flex-direction: column; min-width: 0; }
+  .panel-head { display: flex; align-items: center; gap: .5rem; padding: .6rem .9rem;
+                border-bottom: 1px solid var(--border); background: #1c2129;
+                font-family: var(--mono); font-size: .82rem; }
+  .dot { width: .65rem; height: .65rem; border-radius: 50%; }
+  .dot.in { background: var(--warn); }
+  .dot.out { background: var(--accent); }
+  .panel pre { padding: 1rem; overflow-x: auto; font-size: .78rem; line-height: 1.55;
+               flex: 1; color: #c9d4e0; }
+  .hl7-seg { color: var(--warn); font-weight: 600; }
+  .j-key { color: var(--accent2); }
+  .j-str { color: var(--accent); }
+  .j-num { color: #e8a0e8; }
+  .gaps { border-top: 1px dashed var(--border); background: var(--danger-bg);
+          padding: .8rem 1rem; font-size: .8rem; }
+  .gaps strong { color: var(--warn); font-family: var(--mono); }
+  .gaps ul { margin: .3rem 0 0 1.1rem; color: var(--muted); }
+
+  /* Deterministic */
+  .det { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+         padding: 1.6rem 1.8rem; }
+  .det p { color: var(--text); max-width: 55rem; }
+  .det .sub { color: var(--muted); margin-top: .6rem; }
+
+  /* What it does */
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 1rem; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+          padding: 1.2rem 1.3rem; }
+  .card code { color: var(--accent); font-size: .95rem; }
+  .card p { margin-top: .5rem; font-size: .92rem; }
+
+  /* Compliance */
+  .compliance { border: 2px solid var(--warn); border-radius: 10px; background: var(--danger-bg);
+                padding: 1.4rem 1.6rem; text-align: center; }
+  .compliance p { color: var(--warn); font-size: clamp(1rem, 2.4vw, 1.25rem);
+                  font-weight: 700; font-family: var(--mono); }
+
+  /* Roadmap */
+  .road { list-style: none; }
+  .road li { display: flex; gap: .8rem; align-items: baseline; padding: .55rem 0;
+             border-bottom: 1px solid var(--border); }
+  .road li:last-child { border-bottom: 0; }
+  .road .mark { font-family: var(--mono); color: var(--accent); flex-shrink: 0; }
+  .road .txt { color: var(--text); }
+  .road .note { color: var(--muted); font-size: .85rem; }
+
+  /* Footer */
+  footer { border-top: 1px solid var(--border); padding: 2.2rem 0 2.8rem; text-align: center; }
+  footer p { font-size: .9rem; }
+  footer .avail { margin-top: .5rem; color: var(--text); }
+
+  @media (max-width: 800px) {
+    section { padding: 2.4rem 0; }
+    .demo-grid { grid-template-columns: 1fr; }
+    .arrow { transform: rotate(90deg); padding: .2rem 0; }
+  }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <span class="badge">claude code plugin · v0.3.0 · MIT</span>
+    <h1>HealthIT <span class="hl">Copilot</span></h1>
+    <p class="tagline">HL7 v2 ↔ FHIR mapping and interface debugging, inside Claude Code.</p>
+    <p class="who">Built for Health-IT and healthcare integration engineers who live in ORU feeds, interface engines, and FHIR APIs.</p>
+    <div class="installs">
+      <p class="step"># 1 — add the marketplace</p>
+      <div class="cmd"><code>/plugin marketplace add sinteco/healthit-copilot</code></div>
+      <p class="step"># 2 — install the plugin</p>
+      <div class="cmd"><code>/plugin install healthit-copilot@sintayehu-health</code></div>
+    </div>
+  </div>
+</header>
+
+<section id="demo">
+  <div class="wrap">
+    <h2><span class="hash">#</span>Before / after</h2>
+    <p style="margin-bottom:1.2rem">One lab result message in, one valid FHIR R4 transaction Bundle out — with every mapping gap flagged instead of silently guessed.</p>
+    <div class="demo-grid">
+      <div class="panel">
+        <div class="panel-head"><span class="dot in"></span>HL7 ORU^R01 in</div>
+        <pre><span class="hl7-seg">MSH</span>|^~\&amp;|LAB|HOSP|EMR|HOSP|20240115||ORU^R01|MSG001|P|2.5
+<span class="hl7-seg">PID</span>|1||12345^^^HOSP^MR||DOE^JOHN||19800101|M
+<span class="hl7-seg">OBR</span>|1||ORD789|CBC^Complete Blood Count^L|||20240115
+<span class="hl7-seg">OBX</span>|1|NM|718-7^Hemoglobin^LN||13.5|g/dL|13.0-17.0|N|||F
+<span class="hl7-seg">OBX</span>|2|NM|4544-3^Hematocrit^LN||40.5|%|40-50|N|||F</pre>
+      </div>
+      <div class="arrow">→</div>
+      <div class="panel">
+        <div class="panel-head"><span class="dot out"></span>FHIR R4 out</div>
+        <pre>{
+  <span class="j-key">"resourceType"</span>: <span class="j-str">"Bundle"</span>,
+  <span class="j-key">"type"</span>: <span class="j-str">"transaction"</span>,
+  <span class="j-key">"entry"</span>: [
+    { <span class="j-key">"fullUrl"</span>: <span class="j-str">"urn:uuid:patient-1"</span>,
+      <span class="j-key">"resource"</span>: {
+        <span class="j-key">"resourceType"</span>: <span class="j-str">"Patient"</span>,
+        <span class="j-key">"identifier"</span>: [{ <span class="j-key">"value"</span>: <span class="j-str">"12345"</span> }],
+        <span class="j-key">"name"</span>: [{ <span class="j-key">"family"</span>: <span class="j-str">"DOE"</span>, <span class="j-key">"given"</span>: [<span class="j-str">"JOHN"</span>] }],
+        <span class="j-key">"birthDate"</span>: <span class="j-str">"1980-01-01"</span>, <span class="j-key">"gender"</span>: <span class="j-str">"male"</span> },
+      <span class="j-key">"request"</span>: { <span class="j-key">"method"</span>: <span class="j-str">"POST"</span>, <span class="j-key">"url"</span>: <span class="j-str">"Patient"</span> } },
+    { <span class="j-key">"fullUrl"</span>: <span class="j-str">"urn:uuid:report-1"</span>,
+      <span class="j-key">"resource"</span>: {
+        <span class="j-key">"resourceType"</span>: <span class="j-str">"DiagnosticReport"</span>,
+        <span class="j-key">"status"</span>: <span class="j-str">"final"</span>,
+        <span class="j-key">"code"</span>: { <span class="j-key">"text"</span>: <span class="j-str">"Complete Blood Count"</span> },
+        <span class="j-key">"subject"</span>: { <span class="j-key">"reference"</span>: <span class="j-str">"urn:uuid:patient-1"</span> },
+        <span class="j-key">"effectiveDateTime"</span>: <span class="j-str">"2024-01-15"</span>,
+        <span class="j-key">"result"</span>: [{ <span class="j-key">"reference"</span>: <span class="j-str">"urn:uuid:obs-1"</span> },
+                   { <span class="j-key">"reference"</span>: <span class="j-str">"urn:uuid:obs-2"</span> }] } },
+    { <span class="j-key">"fullUrl"</span>: <span class="j-str">"urn:uuid:obs-1"</span>,
+      <span class="j-key">"resource"</span>: {
+        <span class="j-key">"resourceType"</span>: <span class="j-str">"Observation"</span>, <span class="j-key">"status"</span>: <span class="j-str">"final"</span>,
+        <span class="j-key">"code"</span>: { <span class="j-key">"coding"</span>: [{ <span class="j-key">"system"</span>: <span class="j-str">"http://loinc.org"</span>,
+                    <span class="j-key">"code"</span>: <span class="j-str">"718-7"</span>, <span class="j-key">"display"</span>: <span class="j-str">"Hemoglobin"</span> }] },
+        <span class="j-key">"valueQuantity"</span>: { <span class="j-key">"value"</span>: <span class="j-num">13.5</span>, <span class="j-key">"unit"</span>: <span class="j-str">"g/dL"</span> },
+        <span class="j-key">"referenceRange"</span>: [{ <span class="j-key">"text"</span>: <span class="j-str">"13.0-17.0"</span> }],
+        <span class="j-key">"interpretation"</span>: [{ <span class="j-key">"coding"</span>: [{ <span class="j-key">"code"</span>: <span class="j-str">"N"</span> }] }] } },
+    { <span class="j-key">"fullUrl"</span>: <span class="j-str">"urn:uuid:obs-2"</span>,
+      <span class="j-key">"resource"</span>: {
+        <span class="j-key">"resourceType"</span>: <span class="j-str">"Observation"</span>, <span class="j-key">"status"</span>: <span class="j-str">"final"</span>,
+        <span class="j-key">"code"</span>: { <span class="j-key">"coding"</span>: [{ <span class="j-key">"system"</span>: <span class="j-str">"http://loinc.org"</span>,
+                    <span class="j-key">"code"</span>: <span class="j-str">"4544-3"</span>, <span class="j-key">"display"</span>: <span class="j-str">"Hematocrit"</span> }] },
+        <span class="j-key">"valueQuantity"</span>: { <span class="j-key">"value"</span>: <span class="j-num">40.5</span>, <span class="j-key">"unit"</span>: <span class="j-str">"%"</span> },
+        <span class="j-key">"referenceRange"</span>: [{ <span class="j-key">"text"</span>: <span class="j-str">"40-50"</span> }] } }
+  ]
+}</pre>
+        <div class="gaps">
+          <strong>_gaps flagged:</strong>
+          <ul>
+            <li>OBX-3 codes are pass-through — confirm against LOINC before go-live</li>
+            <li>OBR-4 order code is local (^L) — verify against the order catalog</li>
+            <li>No UCUM validation performed on units</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="deterministic">
+  <div class="wrap">
+    <h2><span class="hash">#</span>Why it's not just an LLM</h2>
+    <div class="det">
+      <p>Parsing, validation, and transformation run as <strong>real, deterministic code</strong> — a spec-correct HL7 v2 parser and a FHIR R4 rules engine shipped with the plugin. Field positions, encoding characters, escape sequences, and status value sets come from executed output, not from a model's recollection of the HL7 spec.</p>
+      <p class="sub">Claude does what it's good at — explaining, planning the mapping, spotting semantic mismatches — while the tools guarantee that PID-7 really is the birth date and that <code>"finalized"</code> is not a valid Observation status. Anything the tools can't ground gets flagged in <code>_gaps</code> instead of guessed.</p>
+    </div>
+  </div>
+</section>
+
+<section id="commands">
+  <div class="wrap">
+    <h2><span class="hash">#</span>What it does</h2>
+    <div class="cards">
+      <div class="card">
+        <code>/map-hl7-to-fhir</code>
+        <p>Convert an HL7 v2 message (ORU, ADT, ORM) into a valid FHIR R4 transaction Bundle, with every unmapped field reported.</p>
+      </div>
+      <div class="card">
+        <code>/validate-fhir</code>
+        <p>Validate FHIR JSON against R4 structural rules — required elements, status value sets, value[x] — and explain each finding.</p>
+      </div>
+      <div class="card">
+        <code>/diag-sync</code>
+        <p>Diagnose interface failures step by step: parse the rejected message, isolate the offending field, propose the fix.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="compliance">
+  <div class="wrap">
+    <div class="compliance">
+      <p>Runs locally. Test / de-identified data only. No PHI leaves your machine.</p>
+    </div>
+  </div>
+</section>
+
+<section id="roadmap">
+  <div class="wrap">
+    <h2><span class="hash">#</span>Roadmap</h2>
+    <ul class="road">
+      <li><span class="mark">[✓]</span><span class="txt">Mirth / Rhapsody transformer codegen <span class="note">— shipped in v0.2, plus FHIR Mapping Language in v0.3</span></span></li>
+      <li><span class="mark">[✓]</span><span class="txt">HAPI profile validation (US Core) <span class="note">— shipped in v0.2 via the official HL7 validator CLI</span></span></li>
+      <li><span class="mark">[✓]</span><span class="txt">Live LOINC / VSAC terminology lookup <span class="note">— shipped: tx.fhir.org lookup in v0.2, VSAC ValueSet expansion in v0.3</span></span></li>
+    </ul>
+    <p style="margin-top:.9rem">Next up: HL7 v2.x version-aware field dictionaries, CDA/CCD mapping, and SIU/MDM builders — see the <a href="https://github.com/sinteco/healthit-copilot#roadmap">full roadmap</a>.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p><a href="https://github.com/sinteco/healthit-copilot">github.com/sinteco/healthit-copilot</a> · MIT licensed · <a href="https://github.com/sinteco/healthit-copilot/blob/main/PRIVACY.md">privacy</a></p>
+    <p class="avail">Available for healthcare integration work — reach out via GitHub.</p>
+  </div>
+</footer>
+
+</body>
+</html>
