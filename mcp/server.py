@@ -19,7 +19,14 @@ Design notes:
 
 import sys
 import json
+import os
 import re
+import shutil
+import subprocess
+import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 
 
 # ----------------------------- MCP plumbing ---------------------------------
@@ -462,6 +469,500 @@ def hl7_to_fhir_skeleton(message: str) -> dict:
             "_gaps": gaps}
 
 
+# ------------------------ engine codegen (Mirth / Rhapsody) -----------------
+
+def _js_str(s):
+    return json.dumps(str(s))
+
+
+def generate_engine_code(message: str, target: str = "mirth") -> dict:
+    """Generate an integration-engine transformer from an ORU^R01 message.
+
+    Targets:
+      - mirth    : Mirth / NextGen Connect JavaScript transformer step
+                   (E4X msg[...] source, channelMap JSON output)
+      - rhapsody : Rhapsody JavaScript filter/mapper (HL7 message input,
+                   FHIR JSON output string)
+
+    The generated code mirrors hl7_to_fhir_skeleton's mapping so engine
+    behavior matches what was reviewed in Claude Code.
+    """
+    target = (target or "mirth").lower()
+    if target not in ("mirth", "rhapsody"):
+        return {"error": f"Unknown target '{target}'. Use 'mirth' or 'rhapsody'."}
+
+    parsed = parse_hl7v2(message)
+    if "error" in parsed:
+        return parsed
+
+    seg_counts = parsed["segment_counts"]
+    has_pid = seg_counts.get("PID", 0) > 0
+    has_obr = seg_counts.get("OBR", 0) > 0
+    n_obx = seg_counts.get("OBX", 0)
+
+    if target == "mirth":
+        code = _mirth_transformer(has_pid, has_obr)
+        notes = [
+            "Paste as a JavaScript transformer step on a channel whose inbound "
+            "datatype is HL7 v2.x (E4X message tree available as `msg`).",
+            "Output Bundle JSON is stored in channelMap 'fhirBundle'; set the "
+            "outbound template / destination to use it "
+            "(e.g. HTTP Sender body: ${fhirBundle}).",
+            "OBX-3 codes are copied through — wire your site's code map or a "
+            "terminology service before go-live.",
+        ]
+    else:
+        code = _rhapsody_mapper(has_pid, has_obr)
+        notes = [
+            "Use in a Rhapsody JavaScript filter with an HL7 v2 input message; "
+            "emits one FHIR JSON output message.",
+            "Assumes standard delimiters after the engine's inbound parse; "
+            "adjust getField/getComp if your route re-encodes.",
+            "OBX-3 codes are copied through — add a Rhapsody lookup table for "
+            "local-to-LOINC translation.",
+        ]
+
+    return {"target": target, "language": "javascript",
+            "message_profile": {"segments": seg_counts, "obx_count": n_obx,
+                                "has_pid": has_pid, "has_obr": has_obr},
+            "code": code, "notes": notes}
+
+
+def _mirth_transformer(has_pid, has_obr):
+    parts = ["""\
+// HealthIT Copilot — Mirth/NextGen Connect transformer: ORU^R01 -> FHIR R4 Bundle
+// Generated to match the reviewed hl7_to_fhir_skeleton mapping.
+
+function hl7ts2fhir(ts) {
+    ts = String(ts || '');
+    var m = ts.match(/^(\\d{4})(\\d{2})?(\\d{2})?(\\d{2})?(\\d{2})?(\\d{2})?/);
+    if (!m) return '';
+    var d = m[1] + (m[2] ? '-' + m[2] : '') + (m[3] ? '-' + m[3] : '');
+    if (!m[4]) return d;
+    return d + 'T' + m[4] + ':' + (m[5] || '00') + ':' + (m[6] || '00') + 'Z';
+}
+
+var GENDER = {F:'female', M:'male', O:'other', U:'unknown', A:'other', N:'unknown'};
+var OBX_STATUS = {F:'final', C:'corrected', P:'preliminary', I:'registered',
+                  R:'registered', S:'preliminary', D:'entered-in-error',
+                  X:'cancelled', W:'entered-in-error', U:'final', A:'amended'};
+var OBR_STATUS = {F:'final', C:'corrected', P:'preliminary', I:'registered',
+                  S:'registered', A:'partial', R:'partial', O:'registered',
+                  X:'cancelled', Y:'unknown', Z:'unknown'};
+
+function cc(code, text, system) {
+    var out = {text: String(text || code || '')};
+    if (code) {
+        var coding = {code: String(code)};
+        if (text) coding.display = String(text);
+        if (system) coding.system = String(system).toUpperCase() == 'LN'
+            ? 'http://loinc.org' : String(system);
+        out.coding = [coding];
+    }
+    return out;
+}
+
+var entries = [];
+function entry(res) {
+    entries.push({fullUrl: 'urn:uuid:' + res.id, resource: res,
+                  request: {method: 'POST', url: res.resourceType}});
+}
+
+var patientRef = {reference: 'urn:uuid:patient-1'};
+"""]
+    if has_pid:
+        parts.append("""\
+// --- PID -> Patient ---
+var patient = {resourceType: 'Patient', id: 'patient-1'};
+var pid3 = msg['PID']['PID.3'];
+patient.identifier = [];
+for each (var idRep in pid3) {
+    var idv = idRep['PID.3.1'].toString();
+    if (idv) patient.identifier.push({value: idv});
+}
+var fam = msg['PID']['PID.5']['PID.5.1'].toString();
+var giv = msg['PID']['PID.5']['PID.5.2'].toString();
+if (fam || giv) patient.name = [{family: fam, given: giv ? [giv] : []}];
+var bd = hl7ts2fhir(msg['PID']['PID.7']['PID.7.1'].toString());
+if (bd) patient.birthDate = bd.substring(0, 10);
+var sex = msg['PID']['PID.8']['PID.8.1'].toString().toUpperCase();
+if (sex) patient.gender = GENDER[sex] || 'unknown';
+entry(patient);
+""")
+    if has_obr:
+        parts.append("""\
+// --- OBR -> DiagnosticReport ---
+var report = {resourceType: 'DiagnosticReport', id: 'report-1',
+              status: OBR_STATUS[msg['OBR']['OBR.25']['OBR.25.1'].toString().toUpperCase()] || 'final',
+              code: cc(msg['OBR']['OBR.4']['OBR.4.1'].toString(),
+                       msg['OBR']['OBR.4']['OBR.4.2'].toString(),
+                       msg['OBR']['OBR.4']['OBR.4.3'].toString()),
+              subject: patientRef, result: []};
+var eff = hl7ts2fhir(msg['OBR']['OBR.7']['OBR.7.1'].toString());
+if (eff) report.effectiveDateTime = eff;
+var iss = hl7ts2fhir(msg['OBR']['OBR.22']['OBR.22.1'].toString());
+if (iss) report.issued = iss.indexOf('T') > -1 ? iss : iss + 'T00:00:00Z';
+""")
+    parts.append("""\
+// --- OBX* -> Observation* ---
+var obsList = [];
+var i = 1;
+for each (var obx in msg['OBX']) {
+    var obs = {resourceType: 'Observation', id: 'obs-' + i,
+               status: OBX_STATUS[obx['OBX.11']['OBX.11.1'].toString().toUpperCase()] || 'final',
+               code: cc(obx['OBX.3']['OBX.3.1'].toString(),
+                        obx['OBX.3']['OBX.3.2'].toString(),
+                        obx['OBX.3']['OBX.3.3'].toString()),
+               subject: patientRef};
+    var vtype = obx['OBX.2']['OBX.2.1'].toString();
+    var val = obx['OBX.5']['OBX.5.1'].toString();
+    if ((vtype == 'NM' || vtype == 'SN') && val !== '' && !isNaN(parseFloat(val))) {
+        obs.valueQuantity = {value: parseFloat(val)};
+        var unit = obx['OBX.6']['OBX.6.1'].toString();
+        if (unit) obs.valueQuantity.unit = unit;
+    } else if (vtype == 'CE' || vtype == 'CWE') {
+        obs.valueCodeableConcept = cc(val, obx['OBX.5']['OBX.5.2'].toString(),
+                                      obx['OBX.5']['OBX.5.3'].toString());
+    } else if (val !== '') {
+        obs.valueString = val;
+    }
+    var rr = obx['OBX.7']['OBX.7.1'].toString();
+    if (rr) obs.referenceRange = [{text: rr}];
+    var interp = obx['OBX.8']['OBX.8.1'].toString();
+    if (interp) obs.interpretation = [{coding: [{
+        system: 'http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation',
+        code: interp}]}];
+    var oeff = hl7ts2fhir(obx['OBX.14']['OBX.14.1'].toString());
+    if (oeff) obs.effectiveDateTime = oeff;
+    obsList.push(obs);
+""")
+    if has_obr:
+        parts.append("    report.result.push({reference: 'urn:uuid:obs-' + i});\n")
+    parts.append("""\
+    i++;
+}
+""")
+    if has_obr:
+        parts.append("entry(report);\n")
+    parts.append("""\
+for each (var o in obsList) entry(o);
+
+var bundle = {resourceType: 'Bundle', type: 'transaction', entry: entries};
+channelMap.put('fhirBundle', JSON.stringify(bundle));
+""")
+    return "".join(parts)
+
+
+def _rhapsody_mapper(has_pid, has_obr):
+    header = """\
+// HealthIT Copilot — Rhapsody JavaScript mapper: ORU^R01 -> FHIR R4 Bundle
+// Attach to a JavaScript filter; input HL7 v2, output FHIR JSON.
+
+function transform(input) {
+    var raw = input.text().replace(/\\r\\n/g, '\\r').replace(/\\n/g, '\\r');
+    var segs = raw.split('\\r').filter(function (l) { return l.length > 0; });
+    var fieldSep = segs[0].charAt(3);
+    function fields(line) { return line.split(fieldSep); }
+    function seg(name) {
+        for (var i = 0; i < segs.length; i++)
+            if (segs[i].substring(0, 3) == name) return fields(segs[i]);
+        return null;
+    }
+    function allSegs(name) {
+        var out = [];
+        for (var i = 0; i < segs.length; i++)
+            if (segs[i].substring(0, 3) == name) out.push(fields(segs[i]));
+        return out;
+    }
+    // f: 1-based HL7 field (MSH offset NOT applied — non-MSH segments only)
+    function fld(f, n) { return (f && f.length > n) ? f[n] : ''; }
+    function comp(v, n) { var c = String(v || '').split('^'); return c.length > n ? c[n] : ''; }
+
+    function hl7ts2fhir(ts) {
+        var m = String(ts || '').match(/^(\\d{4})(\\d{2})?(\\d{2})?(\\d{2})?(\\d{2})?(\\d{2})?/);
+        if (!m) return '';
+        var d = m[1] + (m[2] ? '-' + m[2] : '') + (m[3] ? '-' + m[3] : '');
+        if (!m[4]) return d;
+        return d + 'T' + m[4] + ':' + (m[5] || '00') + ':' + (m[6] || '00') + 'Z';
+    }
+
+    var GENDER = {F:'female', M:'male', O:'other', U:'unknown', A:'other', N:'unknown'};
+    var OBX_STATUS = {F:'final', C:'corrected', P:'preliminary', I:'registered',
+                      R:'registered', S:'preliminary', D:'entered-in-error',
+                      X:'cancelled', W:'entered-in-error', U:'final', A:'amended'};
+    var OBR_STATUS = {F:'final', C:'corrected', P:'preliminary', I:'registered',
+                      S:'registered', A:'partial', R:'partial', O:'registered',
+                      X:'cancelled', Y:'unknown', Z:'unknown'};
+
+    function cc(field) {
+        var code = comp(field, 0), text = comp(field, 1), system = comp(field, 2);
+        var out = {text: text || code};
+        if (code) {
+            var coding = {code: code};
+            if (text) coding.display = text;
+            if (system) coding.system = system.toUpperCase() == 'LN'
+                ? 'http://loinc.org' : system;
+            out.coding = [coding];
+        }
+        return out;
+    }
+
+    var entries = [];
+    function entry(res) {
+        entries.push({fullUrl: 'urn:uuid:' + res.id, resource: res,
+                      request: {method: 'POST', url: res.resourceType}});
+    }
+    var patientRef = {reference: 'urn:uuid:patient-1'};
+"""
+    pid_block = """
+    var pid = seg('PID');
+    if (pid) {
+        var patient = {resourceType: 'Patient', id: 'patient-1'};
+        var ids = fld(pid, 3).split('~').filter(function (x) { return x; });
+        patient.identifier = ids.map(function (x) { return {value: comp(x, 0)}; });
+        var fam = comp(fld(pid, 5), 0), giv = comp(fld(pid, 5), 1);
+        if (fam || giv) patient.name = [{family: fam, given: giv ? [giv] : []}];
+        var bd = hl7ts2fhir(fld(pid, 7));
+        if (bd) patient.birthDate = bd.substring(0, 10);
+        var sex = comp(fld(pid, 8), 0).toUpperCase();
+        if (sex) patient.gender = GENDER[sex] || 'unknown';
+        entry(patient);
+    }
+"""
+    obr_block = """
+    var obr = seg('OBR'), report = null;
+    if (obr) {
+        report = {resourceType: 'DiagnosticReport', id: 'report-1',
+                  status: OBR_STATUS[comp(fld(obr, 25), 0).toUpperCase()] || 'final',
+                  code: cc(fld(obr, 4)), subject: patientRef, result: []};
+        var eff = hl7ts2fhir(fld(obr, 7));
+        if (eff) report.effectiveDateTime = eff;
+        var iss = hl7ts2fhir(fld(obr, 22));
+        if (iss) report.issued = iss.indexOf('T') > -1 ? iss : iss + 'T00:00:00Z';
+    }
+"""
+    obx_block = """
+    var obxs = allSegs('OBX');
+    var obsList = [];
+    for (var i = 0; i < obxs.length; i++) {
+        var f = obxs[i], n = i + 1;
+        var obs = {resourceType: 'Observation', id: 'obs-' + n,
+                   status: OBX_STATUS[comp(fld(f, 11), 0).toUpperCase()] || 'final',
+                   code: cc(fld(f, 3)), subject: patientRef};
+        var vtype = fld(f, 2), val = fld(f, 5);
+        if ((vtype == 'NM' || vtype == 'SN') && val !== '' && !isNaN(parseFloat(comp(val, 0) || val))) {
+            obs.valueQuantity = {value: parseFloat(comp(val, 0) || val)};
+            var unit = comp(fld(f, 6), 0);
+            if (unit) obs.valueQuantity.unit = unit;
+        } else if (vtype == 'CE' || vtype == 'CWE') {
+            obs.valueCodeableConcept = cc(val);
+        } else if (val !== '') {
+            obs.valueString = val;
+        }
+        var rr = comp(fld(f, 7), 0);
+        if (rr) obs.referenceRange = [{text: rr}];
+        var interp = comp(fld(f, 8), 0);
+        if (interp) obs.interpretation = [{coding: [{
+            system: 'http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation',
+            code: interp}]}];
+        var oeff = hl7ts2fhir(fld(f, 14));
+        if (oeff) obs.effectiveDateTime = oeff;
+        obsList.push(obs);
+        if (report) report.result.push({reference: 'urn:uuid:obs-' + n});
+    }
+    if (report) entry(report);
+    for (var j = 0; j < obsList.length; j++) entry(obsList[j]);
+
+    return JSON.stringify({resourceType: 'Bundle', type: 'transaction',
+                           entry: entries}, null, 2);
+}
+
+var output = transform(input);
+"""
+    blocks = [header]
+    if has_pid:
+        blocks.append(pid_block)
+    blocks.append(obr_block if has_obr else "\n    var report = null;\n")
+    blocks.append(obx_block)
+    return "".join(blocks)
+
+
+# ------------------------ HAPI validator wrapper -----------------------------
+
+def _find_hapi_jar():
+    """Locate validator_cli.jar: $HAPI_VALIDATOR_JAR, then common paths."""
+    candidates = [os.environ.get("HAPI_VALIDATOR_JAR")]
+    home = os.path.expanduser("~")
+    candidates += [os.path.join(home, ".healthit", "validator_cli.jar"),
+                   os.path.join(home, "validator_cli.jar"),
+                   "validator_cli.jar"]
+    for c in candidates:
+        if c and os.path.isfile(c):
+            return c
+    return None
+
+
+def validate_fhir_hapi(resource, igs=None) -> dict:
+    """Full profile validation via the official HL7 validator CLI (HAPI).
+
+    Requires java on PATH and validator_cli.jar (set $HAPI_VALIDATOR_JAR or
+    put it at ~/.healthit/validator_cli.jar; download from
+    https://github.com/hapifhir/org.hl7.fhir.core/releases).
+
+    igs: list of IG package ids, e.g. ["hl7.fhir.us.core#6.1.0"].
+    """
+    if isinstance(resource, str):
+        try:
+            resource = json.loads(resource)
+        except json.JSONDecodeError as e:
+            return {"valid": False, "errors": [f"Not valid JSON: {e}"]}
+
+    jar = _find_hapi_jar()
+    if not jar:
+        return {"error": "validator_cli.jar not found. Set $HAPI_VALIDATOR_JAR "
+                         "or place it at ~/.healthit/validator_cli.jar. "
+                         "Download: https://github.com/hapifhir/org.hl7.fhir.core/"
+                         "releases/latest/download/validator_cli.jar",
+                "fallback": "Use validate_fhir for structural checks meanwhile."}
+    if not shutil.which("java"):
+        return {"error": "java not found on PATH (HAPI validator needs a JRE).",
+                "fallback": "Use validate_fhir for structural checks meanwhile."}
+
+    with tempfile.TemporaryDirectory() as td:
+        res_path = os.path.join(td, "resource.json")
+        out_path = os.path.join(td, "outcome.json")
+        with open(res_path, "w") as fh:
+            json.dump(resource, fh)
+        cmd = ["java", "-jar", jar, res_path, "-version", "4.0.1",
+               "-output", out_path]
+        for ig in (igs or []):
+            cmd += ["-ig", ig]
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True,
+                                  timeout=300)
+        except subprocess.TimeoutExpired:
+            return {"error": "HAPI validator timed out after 300s."}
+        try:
+            with open(out_path) as fh:
+                outcome = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            return {"error": "HAPI validator produced no OperationOutcome.",
+                    "exit_code": proc.returncode,
+                    "stderr_tail": proc.stderr[-2000:]}
+
+    issues = outcome.get("issue", [])
+    def _fmt(i):
+        loc = (i.get("expression") or i.get("location") or [""])
+        return {"severity": i.get("severity"),
+                "location": loc[0] if loc else "",
+                "details": (i.get("details") or {}).get("text", "")}
+    errors = [_fmt(i) for i in issues if i.get("severity") in ("error", "fatal")]
+    warnings = [_fmt(i) for i in issues if i.get("severity") == "warning"]
+    return {"valid": not errors, "validator": "hapi",
+            "igs": igs or [], "errors": errors, "warnings": warnings,
+            "information_count": sum(1 for i in issues
+                                     if i.get("severity") == "information")}
+
+
+# ------------------------ terminology lookup ---------------------------------
+
+# Offline mini-crosswalk: the lab analytes that show up in almost every ORU
+# feed. Source: LOINC top lab codes (CC BY, LOINC is (c) Regenstrief Institute).
+COMMON_LAB_LOINC = {
+    "WBC":   {"code": "6690-2",  "display": "Leukocytes [#/volume] in Blood by Automated count"},
+    "RBC":   {"code": "789-8",   "display": "Erythrocytes [#/volume] in Blood by Automated count"},
+    "HGB":   {"code": "718-7",   "display": "Hemoglobin [Mass/volume] in Blood"},
+    "HCT":   {"code": "4544-3",  "display": "Hematocrit [Volume Fraction] of Blood by Automated count"},
+    "PLT":   {"code": "777-3",   "display": "Platelets [#/volume] in Blood by Automated count"},
+    "GLU":   {"code": "2345-7",  "display": "Glucose [Mass/volume] in Serum or Plasma"},
+    "GLUCOSE": {"code": "2345-7", "display": "Glucose [Mass/volume] in Serum or Plasma"},
+    "NA":    {"code": "2951-2",  "display": "Sodium [Moles/volume] in Serum or Plasma"},
+    "K":     {"code": "2823-3",  "display": "Potassium [Moles/volume] in Serum or Plasma"},
+    "CL":    {"code": "2075-0",  "display": "Chloride [Moles/volume] in Serum or Plasma"},
+    "CO2":   {"code": "2028-9",  "display": "Carbon dioxide, total [Moles/volume] in Serum or Plasma"},
+    "BUN":   {"code": "3094-0",  "display": "Urea nitrogen [Mass/volume] in Serum or Plasma"},
+    "CREAT": {"code": "2160-0",  "display": "Creatinine [Mass/volume] in Serum or Plasma"},
+    "CREATININE": {"code": "2160-0", "display": "Creatinine [Mass/volume] in Serum or Plasma"},
+    "CA":    {"code": "17861-6", "display": "Calcium [Mass/volume] in Serum or Plasma"},
+    "ALT":   {"code": "1742-6",  "display": "Alanine aminotransferase [Enzymatic activity/volume] in Serum or Plasma"},
+    "AST":   {"code": "1920-8",  "display": "Aspartate aminotransferase [Enzymatic activity/volume] in Serum or Plasma"},
+    "TBIL":  {"code": "1975-2",  "display": "Bilirubin.total [Mass/volume] in Serum or Plasma"},
+    "ALB":   {"code": "1751-7",  "display": "Albumin [Mass/volume] in Serum or Plasma"},
+    "TSH":   {"code": "3016-3",  "display": "Thyrotropin [Units/volume] in Serum or Plasma"},
+    "A1C":   {"code": "4548-4",  "display": "Hemoglobin A1c/Hemoglobin.total in Blood"},
+    "HBA1C": {"code": "4548-4",  "display": "Hemoglobin A1c/Hemoglobin.total in Blood"},
+    "CHOL":  {"code": "2093-3",  "display": "Cholesterol [Mass/volume] in Serum or Plasma"},
+    "TRIG":  {"code": "2571-8",  "display": "Triglyceride [Mass/volume] in Serum or Plasma"},
+    "HDL":   {"code": "2085-9",  "display": "Cholesterol in HDL [Mass/volume] in Serum or Plasma"},
+    "LDL":   {"code": "13457-7", "display": "Cholesterol in LDL [Mass/volume] in Serum or Plasma by calculation"},
+    "INR":   {"code": "6301-6",  "display": "INR in Platelet poor plasma by Coagulation assay"},
+    "PT":    {"code": "5902-2",  "display": "Prothrombin time (PT)"},
+    "PTT":   {"code": "14979-9", "display": "aPTT in Platelet poor plasma by Coagulation assay"},
+    "CRP":   {"code": "1988-5",  "display": "C reactive protein [Mass/volume] in Serum or Plasma"},
+}
+
+TX_SERVER = os.environ.get("HEALTHIT_TX_SERVER", "https://tx.fhir.org/r4")
+
+
+def lookup_terminology(code: str = "", system: str = "http://loinc.org",
+                       text: str = "", offline: bool = False) -> dict:
+    """Look up / verify a terminology code.
+
+    - code + system: verified via the tx server's CodeSystem/$lookup.
+    - text only: matched against the built-in common-lab-LOINC crosswalk.
+    - offline=True (or network failure): built-in crosswalk only.
+
+    Set $HEALTHIT_TX_SERVER to use a different terminology server
+    (default https://tx.fhir.org/r4). Never send PHI to a public tx server.
+    """
+    result = {"query": {"code": code, "system": system, "text": text},
+              "source": None, "match": None, "candidates": []}
+
+    key = (text or code or "").strip().upper()
+    builtin = COMMON_LAB_LOINC.get(key)
+    if builtin:
+        result["candidates"].append({"system": "http://loinc.org",
+                                     "confidence": "builtin-crosswalk",
+                                     **builtin})
+
+    if offline or not code:
+        result["source"] = "builtin"
+        result["match"] = result["candidates"][0] if result["candidates"] else None
+        if not result["match"]:
+            result["note"] = ("No builtin match. Retry with offline=false and a "
+                              "code+system for a live $lookup, or mark UNMAPPED.")
+        return result
+
+    url = (TX_SERVER.rstrip("/") + "/CodeSystem/$lookup?system="
+           + urllib.parse.quote(system, safe="") + "&code="
+           + urllib.parse.quote(code, safe=""))
+    req = urllib.request.Request(url, headers={"Accept": "application/fhir+json",
+                                               "User-Agent": "healthit-copilot/0.1"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.load(resp)
+        params = {p.get("name"): p.get("valueString", p.get("valueCode", ""))
+                  for p in body.get("parameter", []) if "name" in p}
+        result["source"] = TX_SERVER
+        result["match"] = {"system": system, "code": code,
+                           "display": params.get("display", ""),
+                           "code_system_name": params.get("name", ""),
+                           "confidence": "tx-server-verified"}
+        return result
+    except urllib.error.HTTPError as e:
+        result["source"] = TX_SERVER
+        result["tx_error"] = (f"HTTP {e.code}: code '{code}' not resolvable in "
+                              f"{system} (or server rejected the request).")
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        result["source"] = "builtin (tx server unreachable)"
+        result["tx_error"] = f"Terminology server unreachable: {e}"
+
+    result["match"] = result["candidates"][0] if result["candidates"] else None
+    if not result["match"]:
+        result["note"] = "Unverified: mark the code UNMAPPED rather than guessing."
+    return result
+
+
 # ----------------------------- dispatch -------------------------------------
 
 TOOLS = [
@@ -486,12 +987,52 @@ TOOLS = [
      "inputSchema": {"type": "object",
                      "properties": {"message": {"type": "string"}},
                      "required": ["message"]}},
+    {"name": "generate_engine_code",
+     "description": "Generate an integration-engine transformer (Mirth/NextGen "
+                    "Connect JavaScript or Rhapsody JavaScript) that maps the "
+                    "given ORU^R01 to a FHIR R4 transaction Bundle, mirroring "
+                    "hl7_to_fhir_skeleton's mapping. target: 'mirth'|'rhapsody'.",
+     "inputSchema": {"type": "object",
+                     "properties": {"message": {"type": "string"},
+                                    "target": {"type": "string",
+                                               "enum": ["mirth", "rhapsody"]}},
+                     "required": ["message"]}},
+    {"name": "validate_fhir_hapi",
+     "description": "Full FHIR profile validation via the official HL7 "
+                    "validator CLI (requires java + validator_cli.jar; set "
+                    "$HAPI_VALIDATOR_JAR). Pass igs like "
+                    "['hl7.fhir.us.core#6.1.0'] for profile validation. Falls "
+                    "back with instructions if the jar/java is missing.",
+     "inputSchema": {"type": "object",
+                     "properties": {"resource": {"type": ["string", "object"]},
+                                    "igs": {"type": "array",
+                                            "items": {"type": "string"}}},
+                     "required": ["resource"]}},
+    {"name": "lookup_terminology",
+     "description": "Verify or find a terminology code. code+system does a "
+                    "live CodeSystem/$lookup on the tx server "
+                    "($HEALTHIT_TX_SERVER, default tx.fhir.org/r4); text-only "
+                    "matches a built-in common-lab LOINC crosswalk. Use for "
+                    "OBX-3 local-to-LOINC translation. Never send PHI.",
+     "inputSchema": {"type": "object",
+                     "properties": {"code": {"type": "string"},
+                                    "system": {"type": "string"},
+                                    "text": {"type": "string"},
+                                    "offline": {"type": "boolean"}},
+                     "required": []}},
 ]
 
 HANDLERS = {
     "parse_hl7v2": lambda a: parse_hl7v2(a["message"]),
     "validate_fhir": lambda a: validate_fhir(a["resource"]),
     "hl7_to_fhir_skeleton": lambda a: hl7_to_fhir_skeleton(a["message"]),
+    "generate_engine_code": lambda a: generate_engine_code(
+        a["message"], a.get("target", "mirth")),
+    "validate_fhir_hapi": lambda a: validate_fhir_hapi(
+        a["resource"], a.get("igs")),
+    "lookup_terminology": lambda a: lookup_terminology(
+        a.get("code", ""), a.get("system", "http://loinc.org"),
+        a.get("text", ""), a.get("offline", False)),
 }
 
 
@@ -509,7 +1050,7 @@ def main():
         if method == "initialize":
             respond(id_, {"protocolVersion": "2024-11-05",
                           "capabilities": {"tools": {}},
-                          "serverInfo": {"name": "healthit", "version": "0.1.0"}})
+                          "serverInfo": {"name": "healthit", "version": "0.2.0"}})
         elif method == "tools/list":
             respond(id_, {"tools": TOOLS})
         elif method == "tools/call":

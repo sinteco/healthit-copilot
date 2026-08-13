@@ -16,11 +16,29 @@ never invent mappings.** Follow this procedure.
    `_gaps` array; those are the things you must resolve or flag.
 3. **Resolve terminology.** OBX-3 codes are copied through (with a `system`
    only when the message declares one, e.g. `LN` → loinc.org) — not verified.
-   Map local codes to LOINC; OBR-4 to LOINC/the ordering system. If you can't
-   confirm a code, mark it UNMAPPED and say so — do not guess a LOINC code.
-4. **Validate.** Call `validate_fhir` on each resource. Surface every error and
-   warning verbatim, then explain it.
-5. **Report** using the structure below.
+   Call `lookup_terminology` to verify or translate: code+system does a live
+   tx-server `$lookup`; text-only matches the built-in common-lab crosswalk.
+   If it can't be confirmed, mark it UNMAPPED — do not guess a LOINC code.
+4. **Validate.** Call `validate_fhir` on each resource. For profile-level
+   validation (e.g. US Core), call `validate_fhir_hapi` with
+   `igs: ["hl7.fhir.us.core#6.1.0"]` — if the jar is missing it returns setup
+   instructions; fall back to `validate_fhir` and say the check was base-R4
+   structural only. Surface every error and warning verbatim, then explain it.
+5. **Generate engine code when asked.** Call `generate_engine_code` with
+   `target: "mirth"` or `"rhapsody"` — don't hand-write transformer JS. Review
+   the generated code's `notes` and surface them.
+6. **Report** using the structure below.
+
+## Reference crosswalks (v2-to-FHIR IG)
+
+Authoritative condensed tables from the HL7 v2-to-FHIR IG live in this skill:
+
+- `references/segment-maps.md` — MSH/PID/PV1/ORC/OBR/OBX/NTE/SPM field-level maps
+- `references/datatype-vocab-maps.md` — OBX-2 value[x] crosswalk, v2→FHIR
+  datatypes, code-system URIs, status tables (0085/0123/0001)
+
+Read them when mapping any field not covered by the summary tables below, and
+cite deviations.
 
 ## Segment → resource map (ORU^R01)
 
@@ -55,9 +73,9 @@ Always produce:
    which are UNMAPPED.
 3. **Gaps & risks** — grouped as: *missing required*, *cardinality*,
    *datatype*, *identifier*, *terminology*, *validation errors*.
-4. **Transformation code** — when asked. Prefer the user's target engine:
-   - Mirth/NextGen Connect → JavaScript transformer
-   - Rhapsody → mapping/JavaScript
+4. **Transformation code** — when asked. Call `generate_engine_code`:
+   - Mirth/NextGen Connect → `target: "mirth"` (JavaScript transformer step)
+   - Rhapsody → `target: "rhapsody"` (JavaScript filter/mapper)
    - plain → Python (`hl7apy` + `fhir.resources`) or a FHIR StructureMap
 5. **Bundle** — the validated FHIR JSON.
 
