@@ -3,6 +3,34 @@
 All notable changes to HealthIT Copilot. Marketplace installs update through
 version bumps here and in `.claude-plugin/plugin.json`.
 
+## 0.6.0 — 2026-08-13
+
+### Added
+- **C-CDA section coverage growth** — `cda_to_fhir` now also maps
+  Allergies (48765-2) → AllergyIntolerance (allergen from the
+  participant playingEntity, onset), Immunizations (11369-6) →
+  Immunization (CVX system URI, `negationInd` → `not-done`), and
+  Procedures (47519-4) → Procedure (statusCode crosswalk,
+  performedDateTime).
+- **SIU/MDM reverse generation** — `fhir_to_hl7v2` emits SIU^S12 from
+  Appointment Bundles (SCH identifiers, reason, type, TQ start/end,
+  status) and MDM^T02 from DocumentReference Bundles (TXA metadata,
+  base64 attachment decoded back to OBX TX lines). **All 7 in-repo
+  samples now round-trip losslessly — full message-type coverage.**
+- **FHIR R4B/R5 target option** — `hl7_to_fhir_skeleton` and
+  `cda_to_fhir` accept `fhir_version: r4 | r4b | r5`. R5 applies the
+  breaking renames that matter here: `Encounter.class` (list of
+  CodeableConcept) and `actualPeriod`, `Appointment.reason`
+  (CodeableReference), `MedicationStatement.medication.concept` plus
+  the R5 status value set.
+- **`map_directory` tool (batch mode)** — map and validate a whole
+  directory in one call: `.hl7`/`.txt` as HL7 v2, `.xml` as CDA/CCD,
+  with per-file resource counts, gap counts, validation results, and a
+  summary (500-file / 5 MB-per-file limits).
+- FHIR validation rules for AllergyIntolerance, Immunization, and
+  Procedure.
+- 18 new tests (110 total).
+
 ## 0.5.0 — 2026-08-13
 
 ### Added

@@ -22,9 +22,13 @@ Tools:
                            $UMLS_API_KEY
   - explain_hl7_field    : version-aware HL7 v2 field dictionary (2.3-2.8)
   - cda_to_fhir          : map a CDA/CCD XML document to a FHIR Bundle
-                           (Patient, Observations, Conditions, MedicationStatements)
-  - fhir_to_hl7v2        : generate HL7 v2 (ORU/ADT/ORM) from a skeleton Bundle
+                           (Patient, Observations, Conditions,
+                           MedicationStatements, AllergyIntolerances,
+                           Immunizations, Procedures)
+  - fhir_to_hl7v2        : generate HL7 v2 (ORU/ADT/ORM/SIU/MDM) from a
+                           skeleton Bundle
   - round_trip_check     : HL7 -> FHIR -> HL7 -> FHIR fidelity diff
+  - map_directory        : batch-map and validate a directory of messages
 
 NOTE: keep this tool list in sync with TOOLS below — a unit test asserts
 every registered tool name appears here.
@@ -51,7 +55,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 
 # ----------------------------- MCP plumbing ---------------------------------
@@ -234,6 +238,23 @@ FHIR_RULES = {
         "status_values": ["active", "completed", "entered-in-error",
                           "intended", "stopped", "on-hold", "unknown",
                           "not-taken"],
+    },
+    "AllergyIntolerance": {
+        "required": ["patient"],
+        "recommended": ["code", "clinicalStatus"],
+        "status_values": None,
+    },
+    "Immunization": {
+        "required": ["status", "vaccineCode", "patient"],
+        "recommended": ["occurrenceDateTime"],
+        "status_values": ["completed", "entered-in-error", "not-done"],
+    },
+    "Procedure": {
+        "required": ["status", "subject"],
+        "recommended": ["code", "performedDateTime"],
+        "status_values": ["preparation", "in-progress", "not-done",
+                          "on-hold", "stopped", "completed",
+                          "entered-in-error", "unknown"],
     },
     "Bundle": {
         "required": ["type"],
@@ -442,7 +463,58 @@ _ORC_STATUS = {"A": "active", "CA": "revoked", "CM": "completed",
                "IP": "active", "RP": "active", "SC": "active"}
 
 
-def hl7_to_fhir_skeleton(message: str) -> dict:
+_FHIR_VERSIONS = ("r4", "r4b", "r5")
+
+
+def _apply_fhir_version(bundle: dict, fhir_version: str):
+    """Post-process an R4 skeleton Bundle for an R4B or R5 target.
+
+    R4B is structurally identical to R4 for every resource these builders
+    emit. R5 gets the breaking renames that matter here:
+      - Encounter.class  : single Coding -> list of CodeableConcept
+      - Encounter.period -> Encounter.actualPeriod
+      - Appointment.reasonCode -> Appointment.reason (CodeableReference)
+      - MedicationStatement.medication[CodeableConcept] ->
+        medication.concept (CodeableReference); status mapped to the
+        R5 value set (active/completed -> recorded)
+    """
+    v = (fhir_version or "r4").lower()
+    if v not in _FHIR_VERSIONS:
+        return {"error": f"Unknown fhir_version '{fhir_version}' "
+                         f"(expected one of {', '.join(_FHIR_VERSIONS)})"}
+    if "error" in bundle and "resourceType" not in bundle:
+        return bundle
+    if v == "r4":
+        return bundle
+    bundle["_fhir_version"] = v.upper()
+    if v == "r4b":
+        return bundle
+    for e in bundle.get("entry", []):
+        r = e.get("resource", {})
+        rt = r.get("resourceType")
+        if rt == "Encounter":
+            if "class" in r:
+                cls = r.pop("class")
+                r["class"] = [{"coding": [cls]}]
+            if "period" in r:
+                r["actualPeriod"] = r.pop("period")
+        elif rt == "Appointment" and "reasonCode" in r:
+            r["reason"] = [{"concept": cc} for cc in r.pop("reasonCode")]
+        elif rt == "MedicationStatement":
+            if "medicationCodeableConcept" in r:
+                r["medication"] = {
+                    "concept": r.pop("medicationCodeableConcept")}
+            if r.get("status") in ("active", "completed", "intended",
+                                   "stopped", "on-hold", "not-taken"):
+                r["status"] = "recorded"
+    bundle.setdefault("_gaps", []).append(
+        "fhir_version=r5: R5 structural renames applied; note that "
+        "validate_fhir rules target R4 — use validate_fhir_hapi with an "
+        "R5 validator for full checks")
+    return bundle
+
+
+def hl7_to_fhir_skeleton(message: str, fhir_version: str = "r4") -> dict:
     """Turn an HL7 v2 message into a FHIR transaction Bundle skeleton.
 
     Supported message types (from MSH-9):
@@ -469,14 +541,14 @@ def hl7_to_fhir_skeleton(message: str) -> dict:
             break
 
     if msg_type == "ADT":
-        return _adt_skeleton(segs)
+        return _apply_fhir_version(_adt_skeleton(segs), fhir_version)
     if msg_type in ("ORM", "OMG", "OML"):
-        return _orm_skeleton(segs)
+        return _apply_fhir_version(_orm_skeleton(segs), fhir_version)
     if msg_type == "SIU":
-        return _siu_skeleton(segs)
+        return _apply_fhir_version(_siu_skeleton(segs), fhir_version)
     if msg_type == "MDM":
-        return _mdm_skeleton(segs)
-    return _oru_skeleton(segs)
+        return _apply_fhir_version(_mdm_skeleton(segs), fhir_version)
+    return _apply_fhir_version(_oru_skeleton(segs), fhir_version)
 
 
 def _adt_skeleton(segs) -> dict:
@@ -1664,6 +1736,7 @@ def _cda_cc(el):
                "2.16.840.1.113883.6.96": "http://snomed.info/sct",
                "2.16.840.1.113883.6.88":
                    "http://www.nlm.nih.gov/research/umls/rxnorm",
+               "2.16.840.1.113883.12.292": "http://hl7.org/fhir/sid/cvx",
                "2.16.840.1.113883.6.90": "http://hl7.org/fhir/sid/icd-10-cm"}
     cc = {}
     if code:
@@ -1685,15 +1758,19 @@ def _cda_ts(value: str) -> str:
 
 # LOINC section codes -> handler kind
 _CDA_SECTIONS = {"30954-2": "results", "8716-3": "results",
-                 "11450-4": "problems", "10160-0": "medications"}
+                 "11450-4": "problems", "10160-0": "medications",
+                 "48765-2": "allergies", "11369-6": "immunizations",
+                 "47519-4": "procedures"}
 
 
-def cda_to_fhir(document: str) -> dict:
-    """Map a CDA / CCD XML document to a FHIR R4 transaction Bundle.
+def cda_to_fhir(document: str, fhir_version: str = "r4") -> dict:
+    """Map a CDA / CCD XML document to a FHIR transaction Bundle.
 
     Header -> Patient; Results & Vital Signs sections -> Observations;
-    Problem List -> Conditions; Medications -> MedicationStatements.
-    Unrecognized sections are reported in _gaps, never silently dropped.
+    Problem List -> Conditions; Medications -> MedicationStatements;
+    Allergies -> AllergyIntolerances; Immunizations -> Immunizations;
+    Procedures -> Procedures. Unrecognized sections are reported in
+    _gaps, never silently dropped. fhir_version: r4 (default), r4b, r5.
     """
     try:
         root = _strip_ns(ET.fromstring(document.strip()))
@@ -1735,7 +1812,9 @@ def cda_to_fhir(document: str) -> dict:
         gaps.append("No recordTarget/patientRole; Patient is empty")
 
     doc_type = _cda_cc(root.find("code"))
-    resources, obs_n, cond_n, med_n = [], 0, 0, 0
+    resources = []
+    counts = {"obs": 0, "cond": 0, "med": 0, "allergy": 0,
+              "imm": 0, "proc": 0}
 
     for comp in root.findall("component/structuredBody/component"):
         section = comp.find("section")
@@ -1748,8 +1827,9 @@ def cda_to_fhir(document: str) -> dict:
         kind = _CDA_SECTIONS.get(sec_code)
         if kind == "results":
             for ob in section.iter("observation"):
-                obs_n += 1
-                obs = {"resourceType": "Observation", "id": f"obs-{obs_n}",
+                counts["obs"] += 1
+                obs = {"resourceType": "Observation",
+                       "id": f"obs-{counts['obs']}",
                        "status": "final", "subject": _PATIENT_REF}
                 code = _cda_cc(ob.find("code"))
                 obs["code"] = code or {"text": f"UNMAPPED ({title})"}
@@ -1796,9 +1876,9 @@ def cda_to_fhir(document: str) -> dict:
                 ccode = _cda_cc(val)
                 if not ccode:
                     continue
-                cond_n += 1
+                counts["cond"] += 1
                 cond = {"resourceType": "Condition",
-                        "id": f"condition-{cond_n}",
+                        "id": f"condition-{counts['cond']}",
                         "code": ccode, "subject": _PATIENT_REF}
                 eff = ob.find("effectiveTime/low")
                 if eff is not None and eff.get("value"):
@@ -1815,9 +1895,9 @@ def cda_to_fhir(document: str) -> dict:
                 mcc = _cda_cc(mat)
                 if not mcc:
                     continue
-                med_n += 1
+                counts["med"] += 1
                 ms = {"resourceType": "MedicationStatement",
-                      "id": f"medicationstatement-{med_n}",
+                      "id": f"medicationstatement-{counts['med']}",
                       "status": "active",
                       "medicationCodeableConcept": mcc,
                       "subject": _PATIENT_REF}
@@ -1834,13 +1914,82 @@ def cda_to_fhir(document: str) -> dict:
                 if period:
                     ms["effectivePeriod"] = period
                 resources.append(ms)
+        elif kind == "allergies":
+            for ob in section.iter("observation"):
+                # allergen lives on the participant; fall back to value
+                allergen = _cda_cc(ob.find(
+                    "participant/participantRole/playingEntity/code"))
+                if allergen is None:
+                    allergen = _cda_cc(ob.find("value"))
+                if not allergen:
+                    continue
+                counts["allergy"] += 1
+                ai = {"resourceType": "AllergyIntolerance",
+                      "id": f"allergyintolerance-{counts['allergy']}",
+                      "code": allergen, "patient": _PATIENT_REF,
+                      "clinicalStatus": {"coding": [{
+                          "system": "http://terminology.hl7.org/CodeSystem/"
+                                    "allergyintolerance-clinical",
+                          "code": "active"}]}}
+                low = ob.find("effectiveTime/low")
+                if low is not None and low.get("value"):
+                    ts = _cda_ts(low.get("value"))
+                    if ts:
+                        ai["onsetDateTime"] = ts
+                resources.append(ai)
+            gaps.append("Allergy reaction/severity observations not "
+                        "mapped; clinicalStatus assumed 'active'")
+        elif kind == "immunizations":
+            for sa in section.iter("substanceAdministration"):
+                vcc = _cda_cc(sa.find("consumable/manufacturedProduct/"
+                                      "manufacturedMaterial/code"))
+                if not vcc:
+                    continue
+                counts["imm"] += 1
+                imm = {"resourceType": "Immunization",
+                       "id": f"immunization-{counts['imm']}",
+                       "status": ("not-done"
+                                  if sa.get("negationInd") == "true"
+                                  else "completed"),
+                       "vaccineCode": vcc, "patient": _PATIENT_REF}
+                eff = sa.find("effectiveTime")
+                if eff is not None and eff.get("value"):
+                    ts = _cda_ts(eff.get("value"))
+                    if ts:
+                        imm["occurrenceDateTime"] = (
+                            ts if "T" in ts else ts + "T00:00:00Z")
+                resources.append(imm)
+        elif kind == "procedures":
+            for pr in section.iter("procedure"):
+                pcc = _cda_cc(pr.find("code"))
+                if not pcc:
+                    continue
+                counts["proc"] += 1
+                proc = {"resourceType": "Procedure",
+                        "id": f"procedure-{counts['proc']}",
+                        "status": "completed", "code": pcc,
+                        "subject": _PATIENT_REF}
+                st = pr.find("statusCode")
+                if st is not None and st.get("code") in (
+                        "active", "aborted", "cancelled"):
+                    proc["status"] = {"active": "in-progress",
+                                      "aborted": "stopped",
+                                      "cancelled": "not-done"}[
+                                          st.get("code")]
+                eff = pr.find("effectiveTime")
+                if eff is not None and eff.get("value"):
+                    ts = _cda_ts(eff.get("value"))
+                    if ts:
+                        proc["performedDateTime"] = ts
+                resources.append(proc)
         else:
             gaps.append(f"Section '{title}' (LOINC {sec_code or '??'}) "
                         "not mapped — handle manually if needed")
 
     if not resources:
         gaps.append("No mappable entries found in Results/Problems/"
-                    "Medications sections")
+                    "Medications/Allergies/Immunizations/Procedures "
+                    "sections")
     gaps.append("CDA narrative text not carried over; only structured "
                 "entries are mapped")
 
@@ -1850,7 +1999,7 @@ def cda_to_fhir(document: str) -> dict:
               "_gaps": gaps}
     if doc_type:
         bundle["_document_type"] = doc_type
-    return bundle
+    return _apply_fhir_version(bundle, fhir_version)
 
 
 # ------------------------ FHIR -> HL7 v2 round trip --------------------------
@@ -1910,6 +2059,11 @@ _REV_ENC_CLASS = {"IMP": "I", "AMB": "O", "EMER": "E", "PRENC": "P",
                   "NONAC": "N"}
 _REV_ORC_STATUS = {"active": "A", "revoked": "CA", "completed": "CM",
                    "entered-in-error": "ER", "on-hold": "HD"}
+_REV_SCH_STATUS = {"booked": "Booked", "pending": "Pending",
+                   "waitlisted": "Waitlist", "checked-in": "Started",
+                   "fulfilled": "Complete", "cancelled": "Cancelled",
+                   "noshow": "Noshow", "entered-in-error": "Deleted"}
+_REV_TXA_DOCSTATUS = {"final": "AU", "preliminary": "IP"}
 
 
 def _seg_join(name, fields):
@@ -1952,9 +2106,11 @@ def _pid_from_patient(patient) -> str:
 def fhir_to_hl7v2(bundle) -> dict:
     """Generate an HL7 v2 message from a skeleton-shaped FHIR Bundle.
 
-    Inverse of hl7_to_fhir_skeleton for ORU (DiagnosticReport/Observation),
-    ADT (Encounter), and ORM (ServiceRequest) Bundles. Intended for
-    round-trip interface testing, not production message generation.
+    Inverse of hl7_to_fhir_skeleton: Appointment -> SIU^S12,
+    DocumentReference -> MDM^T02, Encounter -> ADT^A01, ServiceRequest ->
+    ORM^O01, and DiagnosticReport/Observation -> ORU^R01 (the default).
+    Intended for round-trip interface testing, not production message
+    generation.
     """
     if isinstance(bundle, str):
         try:
@@ -1971,6 +2127,60 @@ def fhir_to_hl7v2(bundle) -> dict:
         by_type.setdefault(r.get("resourceType", ""), []).append(r)
 
     patient = (by_type.get("Patient") or [{}])[0]
+
+    if by_type.get("Appointment"):
+        appt = by_type["Appointment"][0]
+        sch = {}
+        for ident in appt.get("identifier", []):
+            label = (ident.get("type") or {}).get("text", "")
+            if "Placer" in label:
+                sch[1] = _escape_hl7(ident.get("value", ""))
+            elif "Filler" in label:
+                sch[2] = _escape_hl7(ident.get("value", ""))
+        reasons = appt.get("reasonCode") or []
+        if reasons:
+            sch[7] = _cc_to_hl7(reasons[0])
+        if appt.get("appointmentType"):
+            sch[8] = _cc_to_hl7(appt["appointmentType"])
+        start = _fhir_ts_to_hl7(appt.get("start", ""))
+        end = _fhir_ts_to_hl7(appt.get("end", ""))
+        if start or end:
+            sch[11] = "^^^" + start + "^" + end
+        sch[25] = _REV_SCH_STATUS.get(appt.get("status", ""), "Booked")
+        return {"message_type": "SIU^S12",
+                "message": "\r".join(
+                    [_msh("SIU^S12", "EMR"), _pid_from_patient(patient),
+                     _seg_join("SCH", sch)])}
+
+    if by_type.get("DocumentReference"):
+        doc = by_type["DocumentReference"][0]
+        txa = {1: "1"}
+        if doc.get("type"):
+            txa[2] = _cc_to_hl7(doc["type"])
+        if doc.get("date"):
+            txa[4] = _fhir_ts_to_hl7(doc["date"])
+        ids = doc.get("identifier") or []
+        if ids and ids[0].get("value"):
+            txa[12] = _escape_hl7(ids[0]["value"])
+        rev = _REV_TXA_DOCSTATUS.get(doc.get("docStatus", ""))
+        if rev:
+            txa[17] = rev
+        txa[19] = "OB" if doc.get("status") == "superseded" else "AV"
+        segs = [_msh("MDM^T02", "EMR"), _pid_from_patient(patient),
+                _seg_join("TXA", txa)]
+        for content in doc.get("content") or []:
+            data = (content.get("attachment") or {}).get("data", "")
+            if not data:
+                continue
+            try:
+                text = base64.b64decode(data).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                continue
+            for n, line in enumerate(text.split("\n"), 1):
+                segs.append(_seg_join(
+                    "OBX", {1: str(n), 2: "TX", 3: f"{n}^Body",
+                            5: _escape_hl7(line), 11: "F"}))
+        return {"message_type": "MDM^T02", "message": "\r".join(segs)}
 
     if by_type.get("Encounter"):
         enc = by_type["Encounter"][0]
@@ -2132,6 +2342,79 @@ def round_trip_check(message: str) -> dict:
                      "the mapping — review before go-live")}
 
 
+# ----------------------------- batch mode -----------------------------------
+
+_BATCH_MAX_FILES = 500
+_BATCH_MAX_BYTES = 5 * 1024 * 1024
+
+
+def map_directory(path: str, fhir_version: str = "r4") -> dict:
+    """Map and validate every message in a directory in one call.
+
+    Reads .hl7/.txt files as HL7 v2 (-> hl7_to_fhir_skeleton) and .xml
+    files as CDA/CCD (-> cda_to_fhir), runs validate_fhir on each result,
+    and returns a per-file report plus a summary. Non-recursive.
+    """
+    if not path or not os.path.isdir(path):
+        return {"error": f"Not a directory: {path!r}"}
+
+    names = sorted(n for n in os.listdir(path)
+                   if os.path.splitext(n)[1].lower()
+                   in (".hl7", ".txt", ".xml")
+                   and os.path.isfile(os.path.join(path, n)))
+    if not names:
+        return {"error": f"No .hl7/.txt/.xml files in {path!r}"}
+    if len(names) > _BATCH_MAX_FILES:
+        return {"error": f"{len(names)} files exceeds the "
+                         f"{_BATCH_MAX_FILES}-file batch limit"}
+
+    results = []
+    ok = failed = invalid = 0
+    for name in names:
+        full = os.path.join(path, name)
+        entry = {"file": name}
+        try:
+            if os.path.getsize(full) > _BATCH_MAX_BYTES:
+                raise ValueError("file exceeds 5 MB batch limit")
+            with open(full, encoding="utf-8", errors="replace") as fh:
+                content = fh.read()
+            if name.lower().endswith(".xml"):
+                bundle = cda_to_fhir(content, fhir_version)
+            else:
+                bundle = hl7_to_fhir_skeleton(content, fhir_version)
+        except (OSError, ValueError) as e:
+            bundle = {"error": str(e)}
+        if "error" in bundle and "resourceType" not in bundle:
+            entry["status"] = "error"
+            entry["error"] = bundle["error"]
+            failed += 1
+            results.append(entry)
+            continue
+
+        rtypes = {}
+        for be in bundle.get("entry", []):
+            rt = be.get("resource", {}).get("resourceType", "?")
+            rtypes[rt] = rtypes.get(rt, 0) + 1
+        entry["resource_counts"] = rtypes
+        entry["gaps"] = len(bundle.get("_gaps", []))
+
+        val = validate_fhir(_strip_underscore(bundle))
+        entry["validation_errors"] = val.get("errors", [])
+        entry["validation_warnings"] = len(val.get("warnings", []))
+        if entry["validation_errors"]:
+            entry["status"] = "invalid"
+            invalid += 1
+        else:
+            entry["status"] = "ok"
+            ok += 1
+        results.append(entry)
+
+    return {"directory": path, "fhir_version": fhir_version,
+            "summary": {"total": len(names), "ok": ok,
+                        "invalid": invalid, "errors": failed},
+            "results": results}
+
+
 # ----------------------------- dispatch -------------------------------------
 
 TOOLS = [
@@ -2150,11 +2433,15 @@ TOOLS = [
                      "properties": {"resource": {"type": ["string", "object"]}},
                      "required": ["resource"]}},
     {"name": "hl7_to_fhir_skeleton",
-     "description": "Convert an ORU^R01 message into a FHIR transaction Bundle "
-                    "skeleton (Patient + DiagnosticReport + Observations). Codes "
-                    "are pass-through; terminology mapping is left to the skill.",
+     "description": "Convert an HL7 v2 message (ORU/ADT/ORM/SIU/MDM) into a "
+                    "FHIR transaction Bundle skeleton. Codes are "
+                    "pass-through; terminology mapping is left to the "
+                    "skill. fhir_version: r4 (default), r4b, or r5.",
      "inputSchema": {"type": "object",
-                     "properties": {"message": {"type": "string"}},
+                     "properties": {"message": {"type": "string"},
+                                    "fhir_version": {
+                                        "type": "string",
+                                        "enum": ["r4", "r4b", "r5"]}},
                      "required": ["message"]}},
     {"name": "generate_engine_code",
      "description": "Generate transformer code that maps the given ORU^R01 to "
@@ -2216,13 +2503,19 @@ TOOLS = [
                                     "version": {"type": "string"}},
                      "required": ["segment"]}},
     {"name": "cda_to_fhir",
-     "description": "Map a CDA / CCD XML document to a FHIR R4 transaction "
+     "description": "Map a CDA / CCD XML document to a FHIR transaction "
                     "Bundle: header -> Patient, Results/Vitals -> "
                     "Observations, Problem List -> Conditions, Medications "
-                    "-> MedicationStatements. Unmapped sections are "
-                    "reported in _gaps.",
+                    "-> MedicationStatements, Allergies -> "
+                    "AllergyIntolerances, Immunizations -> Immunizations, "
+                    "Procedures -> Procedures. Unmapped sections are "
+                    "reported in _gaps. fhir_version: r4 (default), r4b, "
+                    "or r5.",
      "inputSchema": {"type": "object",
-                     "properties": {"document": {"type": "string"}},
+                     "properties": {"document": {"type": "string"},
+                                    "fhir_version": {
+                                        "type": "string",
+                                        "enum": ["r4", "r4b", "r5"]}},
                      "required": ["document"]}},
     {"name": "fhir_to_hl7v2",
      "description": "Generate an HL7 v2 message (ORU/ADT/ORM) from a "
@@ -2241,12 +2534,24 @@ TOOLS = [
      "inputSchema": {"type": "object",
                      "properties": {"message": {"type": "string"}},
                      "required": ["message"]}},
+    {"name": "map_directory",
+     "description": "Batch mode: map and validate every message in a "
+                    "directory in one call. Reads .hl7/.txt as HL7 v2 and "
+                    ".xml as CDA/CCD, validates each resulting Bundle, "
+                    "and returns per-file results plus a summary.",
+     "inputSchema": {"type": "object",
+                     "properties": {"path": {"type": "string"},
+                                    "fhir_version": {
+                                        "type": "string",
+                                        "enum": ["r4", "r4b", "r5"]}},
+                     "required": ["path"]}},
 ]
 
 HANDLERS = {
     "parse_hl7v2": lambda a: parse_hl7v2(a["message"]),
     "validate_fhir": lambda a: validate_fhir(a["resource"]),
-    "hl7_to_fhir_skeleton": lambda a: hl7_to_fhir_skeleton(a["message"]),
+    "hl7_to_fhir_skeleton": lambda a: hl7_to_fhir_skeleton(
+        a["message"], a.get("fhir_version", "r4")),
     "generate_engine_code": lambda a: generate_engine_code(
         a["message"], a.get("target", "mirth")),
     "validate_fhir_hapi": lambda a: validate_fhir_hapi(
@@ -2259,9 +2564,12 @@ HANDLERS = {
         a.get("count", 20), a.get("server", "")),
     "explain_hl7_field": lambda a: explain_hl7_field(
         a["segment"], a.get("field", 0), a.get("version", "2.5")),
-    "cda_to_fhir": lambda a: cda_to_fhir(a["document"]),
+    "cda_to_fhir": lambda a: cda_to_fhir(
+        a["document"], a.get("fhir_version", "r4")),
     "fhir_to_hl7v2": lambda a: fhir_to_hl7v2(a["bundle"]),
     "round_trip_check": lambda a: round_trip_check(a["message"]),
+    "map_directory": lambda a: map_directory(
+        a["path"], a.get("fhir_version", "r4")),
 }
 
 

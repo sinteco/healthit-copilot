@@ -257,8 +257,8 @@ class TestMCPProtocol(unittest.TestCase):
                           "explain_hl7_field", "fhir_to_hl7v2",
                           "generate_engine_code",
                           "hl7_to_fhir_skeleton",
-                          "lookup_terminology", "parse_hl7v2",
-                          "round_trip_check",
+                          "lookup_terminology", "map_directory",
+                          "parse_hl7v2", "round_trip_check",
                           "validate_fhir", "validate_fhir_hapi"])
         parsed = json.loads(by_id[3]["result"]["content"][0]["text"])
         self.assertEqual(parsed["segment_counts"]["OBX"], 3)
@@ -768,7 +768,7 @@ CCD_DOC = """<?xml version="1.0"?>
    </substanceAdministration></entry>
   </section></component>
   <component><section>
-   <code code="48765-2" displayName="Allergies"/>
+   <code code="46240-8" displayName="Encounters"/>
   </section></component>
  </structuredBody></component>
 </ClinicalDocument>"""
@@ -887,7 +887,7 @@ class TestCDAToFHIR(unittest.TestCase):
                          "http://www.nlm.nih.gov/research/umls/rxnorm")
 
     def test_unmapped_section_in_gaps(self):
-        self.assertTrue(any("48765-2" in g for g in self.out["_gaps"]))
+        self.assertTrue(any("46240-8" in g for g in self.out["_gaps"]))
 
     def test_bad_xml(self):
         self.assertIn("error", server.cda_to_fhir("<not xml"))
@@ -935,8 +935,193 @@ class TestRoundTrip(unittest.TestCase):
             with open(path) as fh:
                 msg = fh.read()
             name = os.path.basename(path)
-            if name.startswith(("siu_", "mdm_")):
-                continue  # no reverse generator for SIU/MDM yet
             rt = server.round_trip_check(msg)
             self.assertTrue(rt["round_trip_ok"],
                             "%s: %s" % (name, rt.get("differences")))
+
+
+CCD_EXTRA_SECTIONS = """<ClinicalDocument xmlns="urn:hl7-org:v3"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+ <code code="34133-9"/>
+ <recordTarget><patientRole><id extension="M1" root="1.2.3"/>
+  <patient><name><given>A</given><family>B</family></name>
+   <administrativeGenderCode code="F"/>
+   <birthTime value="19800101"/></patient>
+ </patientRole></recordTarget>
+ <component><structuredBody>
+  <component><section><code code="48765-2"/>
+   <entry><act><entryRelationship><observation>
+    <effectiveTime><low value="2010"/></effectiveTime>
+    <participant><participantRole><playingEntity>
+     <code code="7980" displayName="Penicillin"
+           codeSystem="2.16.840.1.113883.6.88"/>
+    </playingEntity></participantRole></participant>
+   </observation></entryRelationship></act></entry></section></component>
+  <component><section><code code="11369-6"/>
+   <entry><substanceAdministration>
+    <effectiveTime value="20230915"/>
+    <consumable><manufacturedProduct><manufacturedMaterial>
+     <code code="141" displayName="Influenza vaccine"
+           codeSystem="2.16.840.1.113883.12.292"/>
+    </manufacturedMaterial></manufacturedProduct></consumable>
+   </substanceAdministration></entry></section></component>
+  <component><section><code code="47519-4"/>
+   <entry><procedure><statusCode code="completed"/>
+    <code code="80146002" displayName="Appendectomy"
+          codeSystem="2.16.840.1.113883.6.96"/>
+    <effectiveTime value="20150620"/>
+   </procedure></entry></section></component>
+ </structuredBody></component>
+</ClinicalDocument>"""
+
+
+class TestCDAExtraSections(unittest.TestCase):
+    def setUp(self):
+        self.out = server.cda_to_fhir(CCD_EXTRA_SECTIONS)
+        self.by_type = {}
+        for e in self.out["entry"]:
+            r = e["resource"]
+            self.by_type.setdefault(r["resourceType"], []).append(r)
+
+    def test_allergy(self):
+        ai = self.by_type["AllergyIntolerance"][0]
+        coding = ai["code"]["coding"][0]
+        self.assertEqual(coding["code"], "7980")
+        self.assertEqual(coding["system"],
+                         "http://www.nlm.nih.gov/research/umls/rxnorm")
+        self.assertEqual(ai["onsetDateTime"], "2010")
+        self.assertEqual(ai["patient"]["reference"], "urn:uuid:patient-1")
+
+    def test_immunization(self):
+        imm = self.by_type["Immunization"][0]
+        self.assertEqual(imm["status"], "completed")
+        self.assertEqual(imm["vaccineCode"]["coding"][0]["system"],
+                         "http://hl7.org/fhir/sid/cvx")
+        self.assertEqual(imm["occurrenceDateTime"], "2023-09-15T00:00:00Z")
+
+    def test_negated_immunization_not_done(self):
+        doc = CCD_EXTRA_SECTIONS.replace(
+            "<substanceAdministration>",
+            '<substanceAdministration negationInd="true">')
+        out = server.cda_to_fhir(doc)
+        imm = [e["resource"] for e in out["entry"]
+               if e["resource"]["resourceType"] == "Immunization"][0]
+        self.assertEqual(imm["status"], "not-done")
+
+    def test_procedure(self):
+        pr = self.by_type["Procedure"][0]
+        self.assertEqual(pr["status"], "completed")
+        self.assertEqual(pr["code"]["coding"][0]["code"], "80146002")
+        self.assertEqual(pr["performedDateTime"], "2015-06-20")
+
+    def test_validates_clean(self):
+        out = server.validate_fhir(server._strip_underscore(self.out))
+        self.assertEqual(out["errors"], [])
+
+
+class TestSIUMDMReverse(unittest.TestCase):
+    def test_siu_round_trip(self):
+        rt = server.round_trip_check(SIU_MSG)
+        self.assertTrue(rt["round_trip_ok"], rt.get("differences"))
+        self.assertTrue(
+            rt["regenerated_message"].startswith("MSH|^~\\&|"))
+        self.assertIn("SCH|", rt["regenerated_message"])
+
+    def test_mdm_round_trip(self):
+        rt = server.round_trip_check(MDM_MSG)
+        self.assertTrue(rt["round_trip_ok"], rt.get("differences"))
+        self.assertIn("TXA|", rt["regenerated_message"])
+        self.assertIn("OBX|", rt["regenerated_message"])
+
+    def test_appointment_generates_siu(self):
+        b = server.hl7_to_fhir_skeleton(SIU_MSG)
+        out = server.fhir_to_hl7v2(b)
+        self.assertEqual(out["message_type"], "SIU^S12")
+
+    def test_docref_generates_mdm(self):
+        b = server.hl7_to_fhir_skeleton(MDM_MSG)
+        out = server.fhir_to_hl7v2(b)
+        self.assertEqual(out["message_type"], "MDM^T02")
+
+
+class TestFHIRVersionOption(unittest.TestCase):
+    def test_r4_default_no_marker(self):
+        b = server.hl7_to_fhir_skeleton(ADT)
+        self.assertNotIn("_fhir_version", b)
+
+    def test_r4b_marker_only(self):
+        b = server.hl7_to_fhir_skeleton(ADT, "r4b")
+        self.assertEqual(b["_fhir_version"], "R4B")
+        enc = [e["resource"] for e in b["entry"]
+               if e["resource"]["resourceType"] == "Encounter"][0]
+        self.assertIn("class", enc)
+        self.assertIsInstance(enc["class"], dict)  # unchanged from R4
+
+    def test_r5_encounter_renames(self):
+        b = server.hl7_to_fhir_skeleton(ADT, "r5")
+        enc = [e["resource"] for e in b["entry"]
+               if e["resource"]["resourceType"] == "Encounter"][0]
+        self.assertIsInstance(enc["class"], list)
+        self.assertIn("coding", enc["class"][0])
+        self.assertNotIn("period", enc)
+
+    def test_r5_appointment_reason(self):
+        b = server.hl7_to_fhir_skeleton(SIU_MSG, "r5")
+        appt = [e["resource"] for e in b["entry"]
+                if e["resource"]["resourceType"] == "Appointment"][0]
+        self.assertNotIn("reasonCode", appt)
+        self.assertIn("concept", appt["reason"][0])
+
+    def test_r5_medication_statement(self):
+        out = server.cda_to_fhir(CCD_DOC, "r5")
+        ms = [e["resource"] for e in out["entry"]
+              if e["resource"]["resourceType"] == "MedicationStatement"][0]
+        self.assertIn("concept", ms["medication"])
+        self.assertNotIn("medicationCodeableConcept", ms)
+        self.assertEqual(ms["status"], "recorded")
+
+    def test_unknown_version_error(self):
+        self.assertIn("error", server.hl7_to_fhir_skeleton(ADT, "r6"))
+        self.assertIn("error", server.cda_to_fhir(CCD_DOC, "stu3"))
+
+
+class TestMapDirectory(unittest.TestCase):
+    def test_samples_directory(self):
+        base = os.path.join(os.path.dirname(__file__), "..", "samples")
+        out = server.map_directory(base)
+        self.assertEqual(out["summary"]["errors"], 0)
+        self.assertEqual(out["summary"]["invalid"], 0)
+        self.assertEqual(out["summary"]["ok"], out["summary"]["total"])
+        self.assertGreaterEqual(out["summary"]["total"], 7)
+        first = out["results"][0]
+        self.assertEqual(first["status"], "ok")
+        self.assertIn("resource_counts", first)
+
+    def test_mixed_directory_with_xml_and_bad_file(self):
+        d = tempfile.mkdtemp()
+        try:
+            with open(os.path.join(d, "a_oru.hl7"), "w") as fh:
+                fh.write(ORU)
+            with open(os.path.join(d, "b_ccd.xml"), "w") as fh:
+                fh.write(CCD_DOC)
+            with open(os.path.join(d, "c_bad.hl7"), "w") as fh:
+                fh.write("not an hl7 message")
+            out = server.map_directory(d)
+            self.assertEqual(out["summary"]["total"], 3)
+            self.assertEqual(out["summary"]["ok"], 2)
+            self.assertEqual(out["summary"]["errors"], 1)
+            by_file = {r["file"]: r for r in out["results"]}
+            self.assertEqual(by_file["b_ccd.xml"]["status"], "ok")
+            self.assertIn("Condition",
+                          by_file["b_ccd.xml"]["resource_counts"])
+            self.assertEqual(by_file["c_bad.hl7"]["status"], "error")
+        finally:
+            shutil.rmtree(d)
+
+    def test_bad_inputs(self):
+        self.assertIn("error", server.map_directory("/nonexistent-dir"))
+        d = tempfile.mkdtemp()
+        try:
+            self.assertIn("error", server.map_directory(d))  # empty
+        finally:
+            shutil.rmtree(d)

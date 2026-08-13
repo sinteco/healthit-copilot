@@ -87,9 +87,12 @@ All tools live in [`mcp/server.py`](mcp/server.py) (stdlib-only Python).
 | `lookup_terminology` | Verify codes live against a terminology server (tx.fhir.org by default; `$HEALTHIT_TX_SERVER` to change), with a built-in common-lab LOINC crosswalk for offline use |
 | `expand_valueset` | FHIR `ValueSet/$expand` against any terminology server, with **VSAC** support: pass an OID and your `$UMLS_API_KEY` and it routes to cts.nlm.nih.gov automatically |
 | `explain_hl7_field` | Version-aware HL7 v2 field dictionary (2.3 → 2.8) for MSH/PID/PV1/ORC/OBR/OBX/NTE: field names, datatypes (incl. CE→CWE and TS→DTM changes at 2.7), HL7 tables, added/withdrawn versions, and FHIR mapping hints |
-| `cda_to_fhir` | **CDA/CCD document** → FHIR Bundle: header → Patient, Results/Vitals → Observations, Problem List → Conditions, Medications → MedicationStatements, with unmapped sections reported in `_gaps` |
-| `fhir_to_hl7v2` | The inverse mapping: generate an HL7 v2 message (ORU/ADT/ORM) from a skeleton-shaped FHIR Bundle, for interface testing |
+| `cda_to_fhir` | **CDA/CCD document** → FHIR Bundle: header → Patient, Results/Vitals → Observations, Problem List → Conditions, Medications → MedicationStatements, Allergies → AllergyIntolerances, Immunizations → Immunizations, Procedures → Procedures, with unmapped sections reported in `_gaps` |
+| `fhir_to_hl7v2` | The inverse mapping: generate an HL7 v2 message (ORU/ADT/ORM/SIU/MDM) from a skeleton-shaped FHIR Bundle, for interface testing |
 | `round_trip_check` | Mapping-fidelity verifier: HL7 → FHIR → HL7 → FHIR, then a recursive diff of the two Bundles. Empty diff = the mapping is lossless for everything it claims to map |
+| `map_directory` | **Batch mode**: map and validate a whole directory in one call (`.hl7`/`.txt` as HL7 v2, `.xml` as CDA/CCD) with per-file results and a summary |
+
+`hl7_to_fhir_skeleton` and `cda_to_fhir` accept a `fhir_version` option (`r4` default, `r4b`, `r5`) — the R5 target applies the breaking renames (`Encounter.class`/`actualPeriod`, `Appointment.reason`, `MedicationStatement.medication`).
 
 ## Commands & skills
 
@@ -162,10 +165,10 @@ avoided entirely with `offline: true`. Full policy:
 
 ## Roadmap
 
-1. C-CDA section coverage growth (allergies, immunizations, procedures)
-2. SIU/MDM reverse generation for full round-trip coverage
-3. FHIR R4B/R5 target option for the skeleton builders
-4. Batch mode: map and validate a directory of messages in one call
+1. C-CDA reverse generation: FHIR Bundle → CCD document
+2. HL7 v2 ACK generation and error-response tooling
+3. X12 270/271 eligibility skeleton support
+4. Configurable mapping profiles (site-specific Z-segments)
 
 Shipped so far: see [CHANGELOG.md](CHANGELOG.md).
 
