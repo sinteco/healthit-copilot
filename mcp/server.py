@@ -5,16 +5,23 @@ Deterministic tools so the LLM orchestrates + explains instead of guessing
 at field positions, cardinality, or datatypes.
 
 Tools:
-  - parse_hl7v2       : parse an HL7 v2 message into structured segments/fields
-  - validate_fhir     : structural validation of a FHIR R4 resource
+  - parse_hl7v2          : parse an HL7 v2 message into structured segments/fields
+  - validate_fhir        : structural validation of a FHIR R4 resource
+  - validate_fhir_hapi   : full profile validation via the HL7 validator CLI
+                           (optional: needs java + validator_cli.jar)
   - hl7_to_fhir_skeleton : build a FHIR Bundle skeleton from an ORU^R01
+  - generate_engine_code : emit a Mirth or Rhapsody JS transformer that mirrors
+                           the skeleton mapping (plain ES5, no E4X)
+  - lookup_terminology   : verify codes against a terminology server
+                           (tx.fhir.org by default) or a built-in lab crosswalk
 
 Design notes:
   - stdlib only, so it runs anywhere python3 exists (no pip step to sell).
-  - parsing is spec-correct for delimiters/encoding chars, not a toy split.
-  - validation is structural + a curated rule set, NOT a full profile validator.
-    For production profile validation, add a `validate_fhir_hapi` tool that
-    shells out to the HAPI validator CLI. Kept out of v1 to avoid a Java dep.
+  - parsing is spec-correct for delimiters/encoding chars/escapes, not a toy split.
+  - validate_fhir is structural + a curated rule set; validate_fhir_hapi is the
+    real profile validator and degrades gracefully when java/jar are absent.
+  - the only network access is lookup_terminology, and it sends only
+    code + system (never message content). See PRIVACY.md.
 """
 
 import sys
@@ -27,6 +34,8 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+
+__version__ = "0.2.1"
 
 
 # ----------------------------- MCP plumbing ---------------------------------
@@ -501,10 +510,14 @@ def generate_engine_code(message: str, target: str = "mirth") -> dict:
     n_obx = seg_counts.get("OBX", 0)
 
     if target == "mirth":
-        code = _mirth_transformer(has_pid, has_obr)
+        code = _mirth_transformer()
         notes = [
-            "Paste as a JavaScript transformer step on a channel whose inbound "
-            "datatype is HL7 v2.x (E4X message tree available as `msg`).",
+            "Paste as a JavaScript transformer step. Plain ES5 with no E4X, so "
+            "it runs on classic Rhino-based Mirth Connect AND newer "
+            "Nashorn/GraalJS-based versions alike.",
+            "Maps from the raw inbound message "
+            "(connectorMessage.getRawData()), independent of the channel's "
+            "inbound datatype parser.",
             "Output Bundle JSON is stored in channelMap 'fhirBundle'; set the "
             "outbound template / destination to use it "
             "(e.g. HTTP Sender body: ${fhirBundle}).",
@@ -512,7 +525,7 @@ def generate_engine_code(message: str, target: str = "mirth") -> dict:
             "terminology service before go-live.",
         ]
     else:
-        code = _rhapsody_mapper(has_pid, has_obr)
+        code = _rhapsody_mapper()
         notes = [
             "Use in a Rhapsody JavaScript filter with an HL7 v2 input message; "
             "emits one FHIR JSON output message.",
@@ -528,162 +541,35 @@ def generate_engine_code(message: str, target: str = "mirth") -> dict:
             "code": code, "notes": notes}
 
 
-def _mirth_transformer(has_pid, has_obr):
-    parts = ["""\
-// HealthIT Copilot — Mirth/NextGen Connect transformer: ORU^R01 -> FHIR R4 Bundle
-// Generated to match the reviewed hl7_to_fhir_skeleton mapping.
+CORE_JS = r"""
+// mapORU: raw HL7 v2 string -> FHIR R4 transaction Bundle (plain ES5 JS).
+// Engine-agnostic: no E4X, no host objects — runs on Rhino, Nashorn,
+// GraalJS, and Node. Mirrors the reviewed hl7_to_fhir_skeleton mapping.
+function mapORU(raw) {
+    raw = String(raw).replace(/\r\n/g, '\r').replace(/\n/g, '\r');
+    var lines = raw.split('\r').filter(function (l) { return l.length > 0; });
+    if (!lines.length || lines[0].indexOf('MSH') !== 0)
+        throw new Error('First segment must be MSH');
+    var FS = lines[0].charAt(3);
+    var CS = lines[0].charAt(4) || '^';
+    var RS = lines[0].charAt(5) || '~';
 
-function hl7ts2fhir(ts) {
-    ts = String(ts || '');
-    var m = ts.match(/^(\\d{4})(\\d{2})?(\\d{2})?(\\d{2})?(\\d{2})?(\\d{2})?/);
-    if (!m) return '';
-    var d = m[1] + (m[2] ? '-' + m[2] : '') + (m[3] ? '-' + m[3] : '');
-    if (!m[4]) return d;
-    return d + 'T' + m[4] + ':' + (m[5] || '00') + ':' + (m[6] || '00') + 'Z';
-}
-
-var GENDER = {F:'female', M:'male', O:'other', U:'unknown', A:'other', N:'unknown'};
-var OBX_STATUS = {F:'final', C:'corrected', P:'preliminary', I:'registered',
-                  R:'registered', S:'preliminary', D:'entered-in-error',
-                  X:'cancelled', W:'entered-in-error', U:'final', A:'amended'};
-var OBR_STATUS = {F:'final', C:'corrected', P:'preliminary', I:'registered',
-                  S:'registered', A:'partial', R:'partial', O:'registered',
-                  X:'cancelled', Y:'unknown', Z:'unknown'};
-
-function cc(code, text, system) {
-    var out = {text: String(text || code || '')};
-    if (code) {
-        var coding = {code: String(code)};
-        if (text) coding.display = String(text);
-        if (system) coding.system = String(system).toUpperCase() == 'LN'
-            ? 'http://loinc.org' : String(system);
-        out.coding = [coding];
+    // f: 1-based HL7 field on a non-MSH segment line
+    function fld(fields, n) { return fields.length > n ? fields[n] : ''; }
+    function comp(v, n) {
+        var c = String(v === undefined ? '' : v).split(CS);
+        return c.length > n ? c[n] : '';
     }
-    return out;
-}
-
-var entries = [];
-function entry(res) {
-    entries.push({fullUrl: 'urn:uuid:' + res.id, resource: res,
-                  request: {method: 'POST', url: res.resourceType}});
-}
-
-var patientRef = {reference: 'urn:uuid:patient-1'};
-"""]
-    if has_pid:
-        parts.append("""\
-// --- PID -> Patient ---
-var patient = {resourceType: 'Patient', id: 'patient-1'};
-var pid3 = msg['PID']['PID.3'];
-patient.identifier = [];
-for each (var idRep in pid3) {
-    var idv = idRep['PID.3.1'].toString();
-    if (idv) patient.identifier.push({value: idv});
-}
-var fam = msg['PID']['PID.5']['PID.5.1'].toString();
-var giv = msg['PID']['PID.5']['PID.5.2'].toString();
-if (fam || giv) patient.name = [{family: fam, given: giv ? [giv] : []}];
-var bd = hl7ts2fhir(msg['PID']['PID.7']['PID.7.1'].toString());
-if (bd) patient.birthDate = bd.substring(0, 10);
-var sex = msg['PID']['PID.8']['PID.8.1'].toString().toUpperCase();
-if (sex) patient.gender = GENDER[sex] || 'unknown';
-entry(patient);
-""")
-    if has_obr:
-        parts.append("""\
-// --- OBR -> DiagnosticReport ---
-var report = {resourceType: 'DiagnosticReport', id: 'report-1',
-              status: OBR_STATUS[msg['OBR']['OBR.25']['OBR.25.1'].toString().toUpperCase()] || 'final',
-              code: cc(msg['OBR']['OBR.4']['OBR.4.1'].toString(),
-                       msg['OBR']['OBR.4']['OBR.4.2'].toString(),
-                       msg['OBR']['OBR.4']['OBR.4.3'].toString()),
-              subject: patientRef, result: []};
-var eff = hl7ts2fhir(msg['OBR']['OBR.7']['OBR.7.1'].toString());
-if (eff) report.effectiveDateTime = eff;
-var iss = hl7ts2fhir(msg['OBR']['OBR.22']['OBR.22.1'].toString());
-if (iss) report.issued = iss.indexOf('T') > -1 ? iss : iss + 'T00:00:00Z';
-""")
-    parts.append("""\
-// --- OBX* -> Observation* ---
-var obsList = [];
-var i = 1;
-for each (var obx in msg['OBX']) {
-    var obs = {resourceType: 'Observation', id: 'obs-' + i,
-               status: OBX_STATUS[obx['OBX.11']['OBX.11.1'].toString().toUpperCase()] || 'final',
-               code: cc(obx['OBX.3']['OBX.3.1'].toString(),
-                        obx['OBX.3']['OBX.3.2'].toString(),
-                        obx['OBX.3']['OBX.3.3'].toString()),
-               subject: patientRef};
-    var vtype = obx['OBX.2']['OBX.2.1'].toString();
-    var val = obx['OBX.5']['OBX.5.1'].toString();
-    if ((vtype == 'NM' || vtype == 'SN') && val !== '' && !isNaN(parseFloat(val))) {
-        obs.valueQuantity = {value: parseFloat(val)};
-        var unit = obx['OBX.6']['OBX.6.1'].toString();
-        if (unit) obs.valueQuantity.unit = unit;
-    } else if (vtype == 'CE' || vtype == 'CWE') {
-        obs.valueCodeableConcept = cc(val, obx['OBX.5']['OBX.5.2'].toString(),
-                                      obx['OBX.5']['OBX.5.3'].toString());
-    } else if (val !== '') {
-        obs.valueString = val;
-    }
-    var rr = obx['OBX.7']['OBX.7.1'].toString();
-    if (rr) obs.referenceRange = [{text: rr}];
-    var interp = obx['OBX.8']['OBX.8.1'].toString();
-    if (interp) obs.interpretation = [{coding: [{
-        system: 'http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation',
-        code: interp}]}];
-    var oeff = hl7ts2fhir(obx['OBX.14']['OBX.14.1'].toString());
-    if (oeff) obs.effectiveDateTime = oeff;
-    obsList.push(obs);
-""")
-    if has_obr:
-        parts.append("    report.result.push({reference: 'urn:uuid:obs-' + i});\n")
-    parts.append("""\
-    i++;
-}
-""")
-    if has_obr:
-        parts.append("entry(report);\n")
-    parts.append("""\
-for each (var o in obsList) entry(o);
-
-var bundle = {resourceType: 'Bundle', type: 'transaction', entry: entries};
-channelMap.put('fhirBundle', JSON.stringify(bundle));
-""")
-    return "".join(parts)
-
-
-def _rhapsody_mapper(has_pid, has_obr):
-    header = """\
-// HealthIT Copilot — Rhapsody JavaScript mapper: ORU^R01 -> FHIR R4 Bundle
-// Attach to a JavaScript filter; input HL7 v2, output FHIR JSON.
-
-function transform(input) {
-    var raw = input.text().replace(/\\r\\n/g, '\\r').replace(/\\n/g, '\\r');
-    var segs = raw.split('\\r').filter(function (l) { return l.length > 0; });
-    var fieldSep = segs[0].charAt(3);
-    function fields(line) { return line.split(fieldSep); }
-    function seg(name) {
-        for (var i = 0; i < segs.length; i++)
-            if (segs[i].substring(0, 3) == name) return fields(segs[i]);
-        return null;
-    }
-    function allSegs(name) {
-        var out = [];
-        for (var i = 0; i < segs.length; i++)
-            if (segs[i].substring(0, 3) == name) out.push(fields(segs[i]));
-        return out;
-    }
-    // f: 1-based HL7 field (MSH offset NOT applied — non-MSH segments only)
-    function fld(f, n) { return (f && f.length > n) ? f[n] : ''; }
-    function comp(v, n) { var c = String(v || '').split('^'); return c.length > n ? c[n] : ''; }
 
     function hl7ts2fhir(ts) {
-        var m = String(ts || '').match(/^(\\d{4})(\\d{2})?(\\d{2})?(\\d{2})?(\\d{2})?(\\d{2})?/);
+        var m = String(ts || '').match(
+            /^(\d{4})(\d{2})?(\d{2})?(\d{2})?(\d{2})?(\d{2})?(?:\.\d+)?([+-]\d{4})?$/);
         if (!m) return '';
         var d = m[1] + (m[2] ? '-' + m[2] : '') + (m[3] ? '-' + m[3] : '');
         if (!m[4]) return d;
-        return d + 'T' + m[4] + ':' + (m[5] || '00') + ':' + (m[6] || '00') + 'Z';
+        var t = 'T' + m[4] + ':' + (m[5] || '00') + ':' + (m[6] || '00');
+        t += m[7] ? m[7].substring(0, 3) + ':' + m[7].substring(3) : 'Z';
+        return d + t;
     }
 
     var GENDER = {F:'female', M:'male', O:'other', U:'unknown', A:'other', N:'unknown'};
@@ -695,96 +581,140 @@ function transform(input) {
                       X:'cancelled', Y:'unknown', Z:'unknown'};
 
     function cc(field) {
+        field = String(field === undefined ? '' : field);
+        if (field.indexOf(CS) === -1) return {text: field};
         var code = comp(field, 0), text = comp(field, 1), system = comp(field, 2);
-        var out = {text: text || code};
+        var out = {};
         if (code) {
             var coding = {code: code};
             if (text) coding.display = text;
-            if (system) coding.system = system.toUpperCase() == 'LN'
+            if (system) coding.system = system.toUpperCase() === 'LN'
                 ? 'http://loinc.org' : system;
             out.coding = [coding];
         }
+        out.text = text || code;
         return out;
     }
 
-    var entries = [];
-    function entry(res) {
-        entries.push({fullUrl: 'urn:uuid:' + res.id, resource: res,
-                      request: {method: 'POST', url: res.resourceType}});
-    }
+    var patient = {resourceType: 'Patient', id: 'patient-1'};
+    var report = null;
+    var observations = [];
+    var obsRefs = [];
     var patientRef = {reference: 'urn:uuid:patient-1'};
-"""
-    pid_block = """
-    var pid = seg('PID');
-    if (pid) {
-        var patient = {resourceType: 'Patient', id: 'patient-1'};
-        var ids = fld(pid, 3).split('~').filter(function (x) { return x; });
-        patient.identifier = ids.map(function (x) { return {value: comp(x, 0)}; });
-        var fam = comp(fld(pid, 5), 0), giv = comp(fld(pid, 5), 1);
-        if (fam || giv) patient.name = [{family: fam, given: giv ? [giv] : []}];
-        var bd = hl7ts2fhir(fld(pid, 7));
-        if (bd) patient.birthDate = bd.substring(0, 10);
-        var sex = comp(fld(pid, 8), 0).toUpperCase();
-        if (sex) patient.gender = GENDER[sex] || 'unknown';
-        entry(patient);
-    }
-"""
-    obr_block = """
-    var obr = seg('OBR'), report = null;
-    if (obr) {
-        report = {resourceType: 'DiagnosticReport', id: 'report-1',
-                  status: OBR_STATUS[comp(fld(obr, 25), 0).toUpperCase()] || 'final',
-                  code: cc(fld(obr, 4)), subject: patientRef, result: []};
-        var eff = hl7ts2fhir(fld(obr, 7));
-        if (eff) report.effectiveDateTime = eff;
-        var iss = hl7ts2fhir(fld(obr, 22));
-        if (iss) report.issued = iss.indexOf('T') > -1 ? iss : iss + 'T00:00:00Z';
-    }
-"""
-    obx_block = """
-    var obxs = allSegs('OBX');
-    var obsList = [];
-    for (var i = 0; i < obxs.length; i++) {
-        var f = obxs[i], n = i + 1;
-        var obs = {resourceType: 'Observation', id: 'obs-' + n,
-                   status: OBX_STATUS[comp(fld(f, 11), 0).toUpperCase()] || 'final',
-                   code: cc(fld(f, 3)), subject: patientRef};
-        var vtype = fld(f, 2), val = fld(f, 5);
-        if ((vtype == 'NM' || vtype == 'SN') && val !== '' && !isNaN(parseFloat(comp(val, 0) || val))) {
-            obs.valueQuantity = {value: parseFloat(comp(val, 0) || val)};
-            var unit = comp(fld(f, 6), 0);
-            if (unit) obs.valueQuantity.unit = unit;
-        } else if (vtype == 'CE' || vtype == 'CWE') {
-            obs.valueCodeableConcept = cc(val);
-        } else if (val !== '') {
-            obs.valueString = val;
+
+    for (var li = 0; li < lines.length; li++) {
+        var name = lines[li].substring(0, 3);
+        var f = lines[li].split(FS);   // f[1] == field 1 for non-MSH segments
+        if (name === 'PID') {
+            var pid3 = fld(f, 3);
+            if (pid3) {
+                patient.identifier = pid3.split(RS)
+                    .map(function (r) { return comp(r, 0); })
+                    .filter(function (v) { return v; })
+                    .map(function (v) { return {value: v}; });
+            }
+            var pid5 = fld(f, 5);
+            if (pid5) {
+                var fam = comp(pid5, 0), giv = comp(pid5, 1);
+                patient.name = [{family: fam, given: giv ? [giv] : []}];
+            }
+            var bd = hl7ts2fhir(comp(fld(f, 7), 0));
+            if (bd) patient.birthDate = bd.substring(0, 10);
+            var sex = comp(fld(f, 8), 0).toUpperCase();
+            if (sex) patient.gender = GENDER[sex] || 'unknown';
+        } else if (name === 'OBR') {
+            var obrStatus = comp(fld(f, 25), 0).toUpperCase();
+            report = {resourceType: 'DiagnosticReport', id: 'report-1',
+                      status: OBR_STATUS[obrStatus] || 'final',
+                      code: cc(fld(f, 4) || 'UNMAPPED-OBR-4'),
+                      subject: patientRef, result: []};
+            var eff = hl7ts2fhir(comp(fld(f, 7), 0));
+            if (eff) report.effectiveDateTime = eff;
+            var iss = hl7ts2fhir(comp(fld(f, 22), 0));
+            if (iss) report.issued = iss.indexOf('T') > -1 ? iss : iss + 'T00:00:00Z';
+        } else if (name === 'OBX') {
+            var n = observations.length + 1;
+            var obxStatus = comp(fld(f, 11), 0).toUpperCase();
+            var obs = {resourceType: 'Observation', id: 'obs-' + n,
+                       status: OBX_STATUS[obxStatus] || 'final',
+                       code: cc(fld(f, 3) || 'UNMAPPED-OBX-3'),
+                       subject: patientRef};
+            var vtype = fld(f, 2), val = fld(f, 5);
+            if (vtype === 'NM' || vtype === 'SN') {
+                var m = String(val).replace(new RegExp('\\' + CS, 'g'), ' ')
+                    .trim().match(/^([<>]=?)?\s*(-?\d+(?:\.\d+)?)$/);
+                if (m) {
+                    var q = {value: parseFloat(m[2])};
+                    var unit = comp(fld(f, 6), 0);
+                    if (unit) q.unit = unit;
+                    if (m[1]) q.comparator = m[1];
+                    obs.valueQuantity = q;
+                } else {
+                    obs.valueString = String(val);
+                }
+            } else if (vtype === 'CE' || vtype === 'CWE') {
+                obs.valueCodeableConcept = cc(val);
+            } else if (val !== '') {
+                obs.valueString = String(val);
+            }
+            var rr = comp(fld(f, 7), 0);
+            if (rr) obs.referenceRange = [{text: rr}];
+            var interp = comp(fld(f, 8), 0);
+            if (interp) obs.interpretation = [{coding: [{
+                system: 'http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation',
+                code: interp}]}];
+            var oeff = hl7ts2fhir(comp(fld(f, 14), 0));
+            if (oeff) obs.effectiveDateTime = oeff;
+            observations.push(obs);
+            obsRefs.push({reference: 'urn:uuid:obs-' + n});
+        } else if (name === 'NTE' && observations.length) {
+            var note = fld(f, 3);
+            if (note) {
+                var last = observations[observations.length - 1];
+                if (!last.note) last.note = [];
+                last.note.push({text: note});
+            }
         }
-        var rr = comp(fld(f, 7), 0);
-        if (rr) obs.referenceRange = [{text: rr}];
-        var interp = comp(fld(f, 8), 0);
-        if (interp) obs.interpretation = [{coding: [{
-            system: 'http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation',
-            code: interp}]}];
-        var oeff = hl7ts2fhir(fld(f, 14));
-        if (oeff) obs.effectiveDateTime = oeff;
-        obsList.push(obs);
-        if (report) report.result.push({reference: 'urn:uuid:obs-' + n});
     }
-    if (report) entry(report);
-    for (var j = 0; j < obsList.length; j++) entry(obsList[j]);
 
-    return JSON.stringify({resourceType: 'Bundle', type: 'transaction',
-                           entry: entries}, null, 2);
+    if (report) report.result = obsRefs;
+
+    function entry(res) {
+        return {fullUrl: 'urn:uuid:' + res.id, resource: res,
+                request: {method: 'POST', url: res.resourceType}};
+    }
+    var entries = [entry(patient)];
+    if (report) entries.push(entry(report));
+    for (var oi = 0; oi < observations.length; oi++)
+        entries.push(entry(observations[oi]));
+
+    return {resourceType: 'Bundle', type: 'transaction', entry: entries};
 }
-
-var output = transform(input);
 """
-    blocks = [header]
-    if has_pid:
-        blocks.append(pid_block)
-    blocks.append(obr_block if has_obr else "\n    var report = null;\n")
-    blocks.append(obx_block)
-    return "".join(blocks)
+
+MIRTH_WRAPPER = """\
+// HealthIT Copilot — Mirth/NextGen Connect transformer step: ORU^R01 -> FHIR R4
+// Plain ES5, no E4X: works on Rhino-based Mirth AND newer Nashorn/GraalJS
+// engines. Reads the raw inbound message, not the E4X `msg` tree.
+""" + "%CORE%" + """
+var bundle = mapORU(connectorMessage.getRawData());
+channelMap.put('fhirBundle', JSON.stringify(bundle));
+"""
+
+RHAPSODY_WRAPPER = """\
+// HealthIT Copilot — Rhapsody JavaScript mapper: ORU^R01 -> FHIR R4 Bundle
+// Attach to a JavaScript filter; input HL7 v2, output FHIR JSON.
+""" + "%CORE%" + """
+var output = JSON.stringify(mapORU(input.text()), null, 2);
+"""
+
+
+def _mirth_transformer():
+    return MIRTH_WRAPPER.replace("%CORE%", CORE_JS)
+
+
+def _rhapsody_mapper():
+    return RHAPSODY_WRAPPER.replace("%CORE%", CORE_JS)
 
 
 # ------------------------ HAPI validator wrapper -----------------------------
@@ -936,8 +866,9 @@ def lookup_terminology(code: str = "", system: str = "http://loinc.org",
     url = (TX_SERVER.rstrip("/") + "/CodeSystem/$lookup?system="
            + urllib.parse.quote(system, safe="") + "&code="
            + urllib.parse.quote(code, safe=""))
-    req = urllib.request.Request(url, headers={"Accept": "application/fhir+json",
-                                               "User-Agent": "healthit-copilot/0.1"})
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/fhir+json",
+        "User-Agent": "healthit-copilot/" + __version__})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             body = json.load(resp)
@@ -1050,7 +981,8 @@ def main():
         if method == "initialize":
             respond(id_, {"protocolVersion": "2024-11-05",
                           "capabilities": {"tools": {}},
-                          "serverInfo": {"name": "healthit", "version": "0.2.0"}})
+                          "serverInfo": {"name": "healthit",
+                                         "version": __version__}})
         elif method == "tools/list":
             respond(id_, {"tools": TOOLS})
         elif method == "tools/call":

@@ -1,5 +1,6 @@
 # HealthIT Copilot — HL7 v2 to FHIR R4 mapping plugin for Claude Code
 
+[![tests](https://github.com/sinteco/healthit-copilot/actions/workflows/tests.yml/badge.svg)](https://github.com/sinteco/healthit-copilot/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://www.python.org/)
 [![No dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](mcp/server.py)
@@ -32,7 +33,8 @@ debugging, and interface-engine (Mirth Connect, Rhapsody) development.
     ranges, interpretations, NTE notes, and an explicit `_gaps` report
   - `generate_engine_code` — emit a **Mirth/NextGen Connect** JavaScript
     transformer or **Rhapsody** JavaScript mapper mirroring the reviewed
-    mapping, ready to paste into your engine
+    mapping. Plain ES5 with no E4X, so it runs on classic Rhino-based Mirth
+    Connect **and** newer Nashorn/GraalJS-based versions alike
   - `lookup_terminology` — verify codes live against a terminology server
     (**tx.fhir.org** by default, `$HEALTHIT_TX_SERVER` to change) with a
     built-in common-lab LOINC crosswalk for offline use
