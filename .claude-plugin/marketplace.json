@@ -9,9 +9,23 @@
     {
       "name": "healthit-copilot",
       "source": "./",
-      "description": "HL7 v2 <-> FHIR R4 mapping, validation, and interface diagnosis with deterministic parse/validate/transform tools.",
+      "description": "HL7 v2 to FHIR R4 mapping, FHIR validation, and interface failure diagnosis with deterministic parse/validate/transform tools. For healthcare interoperability and integration engineers.",
       "license": "MIT",
-      "keywords": ["hl7", "fhir", "healthcare", "interoperability"]
+      "keywords": [
+        "hl7",
+        "hl7v2",
+        "fhir",
+        "fhir-r4",
+        "hl7-to-fhir",
+        "healthcare",
+        "interoperability",
+        "loinc",
+        "emr",
+        "ehr",
+        "integration-engine",
+        "mcp"
+      ],
+      "homepage": "https://github.com/sinteco/healthit-copilot"
     }
   ]
 }

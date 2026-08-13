@@ -2,19 +2,44 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "healthit-copilot",
   "version": "0.1.0",
-  "description": "Healthcare integration copilot for HL7 v2, FHIR, and terminology mapping. Deterministic parse/validate/transform tools + expert skills for interoperability engineers.",
+  "description": "HL7 v2 to FHIR R4 converter, FHIR validator, and interface diagnostics for healthcare interoperability engineers. Deterministic parse/validate/transform MCP tools + expert HL7/FHIR skills. Zero dependencies.",
   "author": {
     "name": "Sintayehu"
   },
   "license": "MIT",
   "repository": "https://github.com/sinteco/healthit-copilot",
-  "keywords": ["hl7", "fhir", "healthcare", "interoperability", "hl7v2", "loinc", "integration", "emr", "ehr"],
+  "keywords": [
+    "hl7",
+    "hl7v2",
+    "fhir",
+    "fhir-r4",
+    "healthcare",
+    "interoperability",
+    "hl7-to-fhir",
+    "oru",
+    "adt",
+    "loinc",
+    "ucum",
+    "integration-engine",
+    "mirth",
+    "rhapsody",
+    "emr",
+    "ehr",
+    "health-it",
+    "mcp",
+    "medical",
+    "lab-results",
+    "validation"
+  ],
   "commands": "./commands",
   "skills": "./skills",
   "mcpServers": {
     "healthit": {
       "command": "python3",
-      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.py"]
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/mcp/server.py"
+      ]
     }
-  }
+  },
+  "homepage": "https://github.com/sinteco/healthit-copilot"
 }
