@@ -5,10 +5,35 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>HealthIT Copilot — HL7 v2 ↔ FHIR mapping inside Claude Code</title>
 <meta name="description" content="HealthIT Copilot is a Claude Code plugin for healthcare integration engineers: HL7 v2 and CDA/CCD to FHIR mapping (R4/R4B/R5), FHIR validation, round-trip checking, and interface debugging with deterministic tools.">
+<link rel="canonical" href="https://sinteco.github.io/healthit-copilot/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='18' fill='%230d1117'/%3E%3Cpath d='M28 22v56M72 22v56M28 50h44' stroke='%234dd0a5' stroke-width='12' stroke-linecap='round'/%3E%3C/svg%3E">
 <meta property="og:title" content="HealthIT Copilot — HL7 v2 ↔ FHIR mapping inside Claude Code">
-<meta property="og:description" content="Deterministic HL7 v2 → FHIR R4 mapping, FHIR validation, and interface debugging for health-IT integration engineers.">
+<meta property="og:description" content="Deterministic HL7 v2 / CDA to FHIR R4/R4B/R5 mapping, validation, round-trip checking, and interface debugging for health-IT integration engineers.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://sinteco.github.io/healthit-copilot/">
+<meta property="og:image" content="https://sinteco.github.io/healthit-copilot/assets/social-card.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="HealthIT Copilot — HL7 v2 ↔ FHIR mapping inside Claude Code">
+<meta name="twitter:description" content="Deterministic HL7 v2 / CDA to FHIR mapping, validation, and interface debugging for health-IT engineers.">
+<meta name="twitter:image" content="https://sinteco.github.io/healthit-copilot/assets/social-card.png">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "HealthIT Copilot",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "macOS, Linux, Windows",
+  "softwareVersion": "0.6.0",
+  "description": "Claude Code plugin for healthcare integration engineers: HL7 v2 and CDA/CCD to FHIR mapping (R4/R4B/R5), FHIR validation, round-trip checking, and interface debugging with deterministic tools.",
+  "url": "https://sinteco.github.io/healthit-copilot/",
+  "downloadUrl": "https://github.com/sinteco/healthit-copilot",
+  "license": "https://opensource.org/licenses/MIT",
+  "offers": {"@type": "Offer", "price": "0", "priceCurrency": "USD"},
+  "author": {"@type": "Person", "name": "Sintayehu Abaynhe", "url": "https://github.com/sinteco"}
+}
+</script>
 <style>
   :root {
     --bg: #0d1117;
@@ -57,8 +82,33 @@
   .installs .step { font-size: .8rem; color: var(--muted); font-family: var(--mono);
                     margin: .9rem 0 .25rem; }
   .cmd { background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-         padding: .8rem 1rem; overflow-x: auto; }
+         padding: .8rem 5.2rem .8rem 1rem; overflow-x: auto; position: relative; }
   .cmd code { color: var(--accent); font-size: .92rem; white-space: pre; }
+  .copybtn { position: absolute; top: 50%; right: .5rem; transform: translateY(-50%);
+             font-family: var(--mono); font-size: .72rem; color: var(--muted);
+             background: var(--bg); border: 1px solid var(--border);
+             border-radius: 6px; padding: .3rem .6rem; cursor: pointer; }
+  .copybtn:hover { color: var(--accent); border-color: var(--accent); }
+  .proof { display: flex; flex-wrap: wrap; gap: .5rem; justify-content: center; margin-top: 1.6rem; }
+  .proof span { font-family: var(--mono); font-size: .76rem; color: var(--accent);
+                border: 1px solid var(--border); border-radius: 999px;
+                padding: .25rem .7rem; background: var(--panel); }
+
+  /* What's new strip */
+  .whatsnew { border-top: 1px solid var(--border); border-bottom: 1px solid var(--border);
+              background: var(--panel); }
+  .whatsnew p { font-family: var(--mono); font-size: .82rem; color: var(--muted);
+                padding: .75rem 0; margin: 0; text-align: center; }
+  .whatsnew strong { color: var(--accent); font-weight: 600; }
+  .whatsnew a { color: var(--accent2); text-decoration: none; }
+
+  /* Tools grid */
+  .toolgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+              gap: .8rem; margin-top: 1.2rem; }
+  .tool { background: var(--panel); border: 1px solid var(--border);
+          border-radius: 8px; padding: .8rem .95rem; }
+  .tool code { font-family: var(--mono); font-size: .82rem; color: var(--accent2); }
+  .tool p { font-size: .82rem; color: var(--muted); margin: .35rem 0 0; }
 
   /* Before/After */
   .demo-grid { display: grid; grid-template-columns: 1fr auto 1fr; gap: 1rem; align-items: stretch; }
@@ -133,12 +183,24 @@
     <p class="who">Built for Health-IT and healthcare integration engineers who live in ORU feeds, interface engines, and FHIR APIs.</p>
     <div class="installs">
       <p class="step"># 1 — add the marketplace</p>
-      <div class="cmd"><code>/plugin marketplace add sinteco/healthit-copilot</code></div>
+      <div class="cmd"><code>/plugin marketplace add sinteco/healthit-copilot</code><button class="copybtn" onclick="copyCmd(this)">copy</button></div>
       <p class="step"># 2 — install the plugin</p>
-      <div class="cmd"><code>/plugin install healthit-copilot@sintayehu-health</code></div>
+      <div class="cmd"><code>/plugin install healthit-copilot@sintayehu-health</code><button class="copybtn" onclick="copyCmd(this)">copy</button></div>
+    </div>
+    <div class="proof">
+      <span>110 tests</span>
+      <span>7/7 samples round-trip losslessly</span>
+      <span>12 deterministic tools</span>
+      <span>zero pip dependencies</span>
     </div>
   </div>
 </header>
+
+<div class="whatsnew">
+  <div class="wrap">
+    <p><strong>New in v0.6.0</strong> — C-CDA allergies / immunizations / procedures · SIU &amp; MDM reverse generation · FHIR R4B/R5 targets · batch directory mapping · <a href="https://github.com/sinteco/healthit-copilot/releases">release notes →</a></p>
+  </div>
+</div>
 
 <section id="demo">
   <div class="wrap">
@@ -236,6 +298,27 @@
   </div>
 </section>
 
+<section id="tools">
+  <div class="wrap">
+    <h2><span class="hash">#</span>All 12 MCP tools</h2>
+    <p>Every command above is backed by deterministic tools you can also call directly.</p>
+    <div class="toolgrid">
+      <div class="tool"><code>parse_hl7v2</code><p>Parse any HL7 v2 message into structured segments, fields, and components.</p></div>
+      <div class="tool"><code>hl7_to_fhir_skeleton</code><p>ORU / ADT / ORM / SIU / MDM → FHIR transaction Bundle (R4, R4B, or R5).</p></div>
+      <div class="tool"><code>cda_to_fhir</code><p>CDA/CCD documents → FHIR: results, problems, meds, allergies, immunizations, procedures.</p></div>
+      <div class="tool"><code>fhir_to_hl7v2</code><p>Reverse-generate HL7 v2 (ORU, ADT, ORM, SIU, MDM) from a FHIR Bundle.</p></div>
+      <div class="tool"><code>round_trip_check</code><p>HL7 → FHIR → HL7 diff to prove your mapping is lossless.</p></div>
+      <div class="tool"><code>validate_fhir</code><p>Structural FHIR R4 validation — required elements, status codes, value[x].</p></div>
+      <div class="tool"><code>validate_fhir_hapi</code><p>Full profile validation (US Core) via the official HL7 validator CLI.</p></div>
+      <div class="tool"><code>generate_engine_code</code><p>Mirth / Rhapsody / FHIR Mapping Language transformer code from a mapping.</p></div>
+      <div class="tool"><code>lookup_terminology</code><p>Live LOINC / SNOMED code lookup against tx.fhir.org.</p></div>
+      <div class="tool"><code>expand_valueset</code><p>Expand VSAC / tx.fhir.org ValueSets to their member codes.</p></div>
+      <div class="tool"><code>explain_hl7_field</code><p>Explain any segment-field position — name, data type, table values.</p></div>
+      <div class="tool"><code>map_directory</code><p>Batch map + validate a whole folder of .hl7 / .xml messages in one call.</p></div>
+    </div>
+  </div>
+</section>
+
 <section id="compliance">
   <div class="wrap">
     <div class="compliance">
@@ -267,6 +350,16 @@
     <p class="avail">Available for healthcare integration work — reach out via GitHub.</p>
   </div>
 </footer>
+
+<script>
+function copyCmd(btn){
+  var code = btn.parentNode.querySelector('code').textContent;
+  navigator.clipboard.writeText(code).then(function(){
+    btn.textContent = 'copied!';
+    setTimeout(function(){ btn.textContent = 'copy'; }, 1500);
+  });
+}
+</script>
 
 </body>
 </html>
