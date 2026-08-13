@@ -82,6 +82,15 @@ python3 -m unittest discover tests -v
 Built for **test / de-identified** messages: spec work, mapping, and code
 generation. Not for production PHI in a consumer tool.
 
+## Privacy
+
+HealthIT Copilot runs **entirely on your machine** — no backend, no telemetry,
+no analytics, no accounts. Nothing you process is collected by the plugin
+author. The only optional network call is `lookup_terminology`, which sends
+just a terminology code (never message content) to https://tx.fhir.org/r4 —
+configurable via `$HEALTHIT_TX_SERVER` or avoidable with `offline: true`.
+Do not use production PHI. Full policy: [PRIVACY.md](PRIVACY.md).
+
 ## Optional extras
 
 - **Profile validation**: download the HL7 validator once —
