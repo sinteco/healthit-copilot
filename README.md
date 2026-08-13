@@ -24,6 +24,7 @@ grounded in real output instead of guessed field positions or value sets.
 
 - [Quick start](#quick-start)
 - [Features](#features)
+- [How it works](#how-it-works)
 - [MCP tools](#mcp-tools)
 - [Commands & skills](#commands--skills)
 - [Usage](#usage)
@@ -77,6 +78,69 @@ git clone https://github.com/sinteco/healthit-copilot
 - **Batch mode**: map and validate a whole directory of messages in one call
 - **Interface debugging** workflow for "the feed stopped syncing" incidents
 - **Zero dependencies**: the MCP server is a single stdlib-only Python file
+
+## How it works
+
+Claude plans and explains; the plugin's **deterministic tools** do the
+parsing, mapping, and validation — so field positions, escape sequences,
+and value sets are grounded in executed code, never guessed.
+
+```mermaid
+flowchart LR
+    subgraph inputs ["Inputs"]
+        HL7["HL7 v2 message<br/>ORU · ADT · ORM · SIU · MDM"]
+        CDA["CDA / CCD<br/>XML document"]
+        DIR["Directory of<br/>messages (batch)"]
+    end
+
+    subgraph plugin ["HealthIT Copilot — stdlib-only MCP server"]
+        PARSE["parse_hl7v2<br/>spec-correct parser"]
+        MAP["hl7_to_fhir_skeleton<br/>cda_to_fhir · map_directory"]
+        VAL["validate_fhir<br/>+ HAPI / US Core (optional)"]
+        TERM["lookup_terminology<br/>expand_valueset (LOINC · VSAC)"]
+        GEN["generate_engine_code<br/>Mirth · Rhapsody · FML"]
+        RT["round_trip_check<br/>FHIR → HL7 → FHIR diff"]
+    end
+
+    subgraph outputs ["Outputs"]
+        BUNDLE["FHIR Bundle<br/>R4 · R4B · R5"]
+        GAPS["_gaps report<br/>every unmapped field"]
+        CODE["Engine transformer<br/>ready to paste"]
+    end
+
+    HL7 --> PARSE --> MAP
+    CDA --> MAP
+    DIR --> MAP
+    MAP --> VAL --> BUNDLE
+    MAP --> GAPS
+    TERM -.verifies codes.-> VAL
+    MAP --> GEN --> CODE
+    BUNDLE --> RT
+```
+
+A typical `/map-hl7-to-fhir` session:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Eng as Integration engineer
+    participant CC as Claude Code
+    participant MCP as MCP server (deterministic)
+
+    Eng->>CC: /map-hl7-to-fhir + ORU^R01 message
+    CC->>MCP: parse_hl7v2(message)
+    MCP-->>CC: segments & fields (exact positions)
+    CC->>MCP: hl7_to_fhir_skeleton(message)
+    MCP-->>CC: FHIR Bundle + _gaps report
+    CC->>MCP: validate_fhir(bundle)
+    MCP-->>CC: errors / warnings
+    CC->>MCP: lookup_terminology(OBX-3 codes)
+    MCP-->>CC: LOINC verification
+    CC-->>Eng: reviewed Bundle, explained gaps,<br/>optional Mirth/Rhapsody transformer
+```
+
+Everything runs **locally** — the only optional network calls are
+terminology lookups (a code, never message content).
 
 ## MCP tools
 
