@@ -7,7 +7,7 @@
     "name": "Sintayehu"
   },
   "license": "MIT",
-  "repository": "https://github.com/<your-github-username>/healthit-copilot",
+  "repository": "https://github.com/sinteco/healthit-copilot",
   "keywords": ["hl7", "fhir", "healthcare", "interoperability", "hl7v2", "loinc", "integration", "emr", "ehr"],
   "commands": "./commands",
   "skills": "./skills",
