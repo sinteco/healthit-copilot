@@ -1,0 +1,6 @@
+MSH|^~\&|LAB|HOSP|EMR|HOSP|20240115120000||ORU^R01|MSG001|P|2.5
+PID|1||12345^^^HOSP^MR||DOE^JOHN||19800101|M
+OBR|1||ORD789|CBC^Complete Blood Count^L|||20240115113000|||||||||||||||20240115115500|||F
+OBX|1|NM|718-7^Hemoglobin^LN||13.5|g/dL|13.0-17.0|N|||F
+OBX|2|NM|4544-3^Hematocrit^LN||40.5|%|40-50|N|||F
+NTE|1||Specimen slightly hemolyzed

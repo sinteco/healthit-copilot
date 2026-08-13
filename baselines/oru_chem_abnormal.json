@@ -1,0 +1,204 @@
+{
+  "_gaps": [
+    "OBX-3 codes are pass-through, not verified LOINC",
+    "No UCUM validation performed on units"
+  ],
+  "entry": [
+    {
+      "fullUrl": "urn:uuid:patient-1",
+      "request": {
+        "method": "POST",
+        "url": "Patient"
+      },
+      "resource": {
+        "birthDate": "1965-03-12",
+        "gender": "female",
+        "id": "patient-1",
+        "identifier": [
+          {
+            "value": "99881"
+          },
+          {
+            "value": "SSN123"
+          }
+        ],
+        "name": [
+          {
+            "family": "GARCIA",
+            "given": [
+              "MARIA"
+            ]
+          }
+        ],
+        "resourceType": "Patient"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:report-1",
+      "request": {
+        "method": "POST",
+        "url": "DiagnosticReport"
+      },
+      "resource": {
+        "code": {
+          "_note": "Verify OBR-4 against LOINC / order catalog",
+          "coding": [
+            {
+              "code": "24323-8",
+              "display": "Comprehensive metabolic panel",
+              "system": "http://loinc.org"
+            }
+          ],
+          "text": "Comprehensive metabolic panel"
+        },
+        "effectiveDateTime": "2024-02-20T08:00:00Z",
+        "id": "report-1",
+        "resourceType": "DiagnosticReport",
+        "result": [
+          {
+            "reference": "urn:uuid:obs-1"
+          },
+          {
+            "reference": "urn:uuid:obs-2"
+          },
+          {
+            "reference": "urn:uuid:obs-3"
+          }
+        ],
+        "status": "final",
+        "subject": {
+          "reference": "urn:uuid:patient-1"
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:obs-1",
+      "request": {
+        "method": "POST",
+        "url": "Observation"
+      },
+      "resource": {
+        "code": {
+          "_note": "Translate OBX-3 to LOINC via terminology tool",
+          "coding": [
+            {
+              "code": "2345-7",
+              "display": "Glucose",
+              "system": "http://loinc.org"
+            }
+          ],
+          "text": "Glucose"
+        },
+        "id": "obs-1",
+        "interpretation": [
+          {
+            "coding": [
+              {
+                "code": "H",
+                "system": "http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation"
+              }
+            ]
+          }
+        ],
+        "referenceRange": [
+          {
+            "text": "70-99"
+          }
+        ],
+        "resourceType": "Observation",
+        "status": "final",
+        "subject": {
+          "reference": "urn:uuid:patient-1"
+        },
+        "valueQuantity": {
+          "unit": "mg/dL",
+          "value": 145.0
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:obs-2",
+      "request": {
+        "method": "POST",
+        "url": "Observation"
+      },
+      "resource": {
+        "code": {
+          "_note": "Translate OBX-3 to LOINC via terminology tool",
+          "coding": [
+            {
+              "code": "2160-0",
+              "display": "Creatinine",
+              "system": "http://loinc.org"
+            }
+          ],
+          "text": "Creatinine"
+        },
+        "id": "obs-2",
+        "interpretation": [
+          {
+            "coding": [
+              {
+                "code": "HH",
+                "system": "http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation"
+              }
+            ]
+          }
+        ],
+        "referenceRange": [
+          {
+            "text": "0.6-1.2"
+          }
+        ],
+        "resourceType": "Observation",
+        "status": "final",
+        "subject": {
+          "reference": "urn:uuid:patient-1"
+        },
+        "valueQuantity": {
+          "comparator": ">",
+          "unit": "mg/dL",
+          "value": 2.0
+        }
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:obs-3",
+      "request": {
+        "method": "POST",
+        "url": "Observation"
+      },
+      "resource": {
+        "code": {
+          "_note": "Translate OBX-3 to LOINC via terminology tool",
+          "coding": [
+            {
+              "code": "1975-2",
+              "display": "Bilirubin",
+              "system": "http://loinc.org"
+            }
+          ],
+          "text": "Bilirubin"
+        },
+        "id": "obs-3",
+        "resourceType": "Observation",
+        "status": "preliminary",
+        "subject": {
+          "reference": "urn:uuid:patient-1"
+        },
+        "valueCodeableConcept": {
+          "coding": [
+            {
+              "code": "L",
+              "display": "Low",
+              "system": "HL70078"
+            }
+          ],
+          "text": "Low"
+        }
+      }
+    }
+  ],
+  "resourceType": "Bundle",
+  "type": "transaction"
+}

@@ -3,6 +3,20 @@
 All notable changes to HealthIT Copilot. Marketplace installs update through
 version bumps here and in `.claude-plugin/plugin.json`.
 
+## 0.4.0 — 2026-08-13
+
+### Added
+- **`explain_hl7_field` tool** — version-aware HL7 v2 field dictionary
+  covering 2.3 → 2.8 for MSH/PID/PV1/ORC/OBR/OBX/NTE: field names,
+  datatypes (including the CE→CWE and TS→DTM transitions at 2.7 and the
+  MSH-9 message-structure component added in 2.3.1), HL7 tables,
+  added/withdrawn version info (e.g. PID-2/PID-4/PID-19 withdrawn in 2.7,
+  OBX-23/24/25 added in 2.5.1), and FHIR mapping hints.
+- **In-repo sample corpus** — `samples/` (2 ORU, 2 ADT, 1 ORM) with
+  recorded `baselines/`; CI now replays the regression harness on every
+  push, so mapping drift fails the build.
+- 7 new tests (66 total).
+
 ## 0.3.0 — 2026-08-13
 
 ### Added

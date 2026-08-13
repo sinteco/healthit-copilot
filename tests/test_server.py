@@ -253,7 +253,8 @@ class TestMCPProtocol(unittest.TestCase):
         self.assertEqual(by_id[1]["result"]["serverInfo"]["name"], "healthit")
         names = [t["name"] for t in by_id[2]["result"]["tools"]]
         self.assertEqual(sorted(names),
-                         ["expand_valueset", "generate_engine_code",
+                         ["expand_valueset", "explain_hl7_field",
+                          "generate_engine_code",
                           "hl7_to_fhir_skeleton",
                           "lookup_terminology", "parse_hl7v2",
                           "validate_fhir", "validate_fhir_hapi"])
@@ -639,3 +640,51 @@ class TestRegressionHarness(unittest.TestCase):
     def test_bad_dir(self):
         self.assertEqual(
             self.regress.main(["/nonexistent-xyz", "--baseline", self.base]), 2)
+
+
+class TestFieldDictionary(unittest.TestCase):
+    def test_single_field(self):
+        out = server.explain_hl7_field("PID", 7)
+        self.assertEqual(out["name"], "Date/Time of Birth")
+        self.assertEqual(out["datatype"], "TS")       # 2.5 default
+        self.assertTrue(out["valid_in_version"])
+
+    def test_datatype_changes_at_27(self):
+        self.assertEqual(
+            server.explain_hl7_field("PID", 7, "2.8")["datatype"], "DTM")
+        self.assertEqual(
+            server.explain_hl7_field("OBR", 4, "2.7")["datatype"], "CWE")
+        self.assertEqual(
+            server.explain_hl7_field("OBR", 4, "2.5.1")["datatype"], "CE")
+
+    def test_withdrawn_field(self):
+        out = server.explain_hl7_field("PID", 19, "2.7")
+        self.assertFalse(out["valid_in_version"])
+        self.assertIn("Withdrawn", out["warning"])
+        self.assertTrue(
+            server.explain_hl7_field("PID", 19, "2.5")["valid_in_version"])
+
+    def test_field_added_later(self):
+        out = server.explain_hl7_field("OBX", 23, "2.4")
+        self.assertFalse(out["valid_in_version"])
+        self.assertIn("added in v2.5.1", out["warning"])
+        self.assertTrue(
+            server.explain_hl7_field("OBX", 23, "2.6")["valid_in_version"])
+
+    def test_whole_segment(self):
+        out = server.explain_hl7_field("obx")
+        self.assertEqual(out["segment"], "OBX")
+        nums = [f["field"] for f in out["fields"]]
+        self.assertIn("OBX-5", nums)
+        self.assertEqual(nums, sorted(nums, key=lambda x: int(x.split("-")[1])))
+
+    def test_errors(self):
+        self.assertIn("error", server.explain_hl7_field("ZZZ"))
+        self.assertIn("error", server.explain_hl7_field("PID", version="9.9"))
+        self.assertIn("error", server.explain_hl7_field("PID", 99))
+
+    def test_msh9_structure_component(self):
+        out = server.explain_hl7_field("MSH", 9, "2.3")
+        self.assertEqual(out["datatype"], "CM")
+        out = server.explain_hl7_field("MSH", 9, "2.4")
+        self.assertEqual(out["datatype"], "MSG")
