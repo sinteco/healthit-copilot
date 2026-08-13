@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "healthit-copilot",
+  "version": "0.1.0",
+  "description": "Healthcare integration copilot for HL7 v2, FHIR, and terminology mapping. Deterministic parse/validate/transform tools + expert skills for interoperability engineers.",
+  "author": {
+    "name": "Sintayehu"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/<your-github-username>/healthit-copilot",
+  "keywords": ["hl7", "fhir", "healthcare", "interoperability", "hl7v2", "loinc", "integration", "emr", "ehr"],
+  "commands": "./commands",
+  "skills": "./skills",
+  "mcpServers": {
+    "healthit": {
+      "command": "python3",
+      "args": ["${CLAUDE_PLUGIN_ROOT}/mcp/server.py"]
+    }
+  }
+}

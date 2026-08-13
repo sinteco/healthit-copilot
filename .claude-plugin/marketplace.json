@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "sintayehu-health",
+  "owner": {
+    "name": "Sintayehu"
+  },
+  "description": "Healthcare interoperability plugins for HL7, FHIR, and integration engineering.",
+  "plugins": [
+    {
+      "name": "healthit-copilot",
+      "source": "./",
+      "description": "HL7 v2 <-> FHIR R4 mapping, validation, and interface diagnosis with deterministic parse/validate/transform tools.",
+      "license": "MIT",
+      "keywords": ["hl7", "fhir", "healthcare", "interoperability"]
+    }
+  ]
+}
