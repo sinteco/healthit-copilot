@@ -3,6 +3,25 @@
 All notable changes to HealthIT Copilot. Marketplace installs update through
 version bumps here and in `.claude-plugin/plugin.json`.
 
+## 0.4.1 — 2026-08-13
+
+### Fixed
+- **Generated engine JS now decodes HL7 escape sequences** — CORE_JS
+  previously never applied `\F\ \S\ \T\ \R\ \E\ \Xdd..\ \.br\` decoding, so
+  Mirth/Rhapsody output silently diverged from `hl7_to_fhir_skeleton` on any
+  message containing escapes. A JS port of `_unescape` is now applied per
+  component (names, identifiers, coded values, units, notes, valueString),
+  and an escape-bearing message was added to the Node execution-diff corpus
+  so this can't regress.
+- Module docstring updated for all 8 tools (was missing `expand_valueset`
+  and `explain_hl7_field`); `generate_engine_code` docstring now documents
+  the `fml` target. A new guard test asserts every registered tool name
+  appears in the module docstring — this drift shipped twice.
+
+### Changed
+- CI pins Node 20 via `actions/setup-node`, so the JS execution-diff tests
+  always run instead of silently skipping when node is absent.
+
 ## 0.4.0 — 2026-08-13
 
 ### Added
