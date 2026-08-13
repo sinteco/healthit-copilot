@@ -62,14 +62,19 @@ git clone https://github.com/sinteco/healthit-copilot
 
 ## Features
 
-- **HL7 v2 → FHIR R4 conversion** with an explicit gap report — never a
-  silent guess
+- **HL7 v2 → FHIR conversion** (ORU, ADT, ORM, SIU, MDM) with an explicit
+  gap report — never a silent guess — targeting R4, R4B, or R5
+- **CDA/CCD document mapping**: results, problems, medications, allergies,
+  immunizations, and procedures → FHIR resources
+- **Round-trip checking**: FHIR → HL7 v2 back-generation and a
+  HL7 → FHIR → HL7 → FHIR fidelity diff for interface testing
 - **Structural + profile validation** (base R4 rules built in; US Core and
   other IGs via the official HL7 validator)
 - **Engine code generation**: Mirth/NextGen Connect JS, Rhapsody JS, and FHIR
   Mapping Language StructureMaps
 - **Live terminology**: code lookup and ValueSet expansion against
   tx.fhir.org or VSAC
+- **Batch mode**: map and validate a whole directory of messages in one call
 - **Interface debugging** workflow for "the feed stopped syncing" incidents
 - **Zero dependencies**: the MCP server is a single stdlib-only Python file
 
