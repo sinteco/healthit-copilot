@@ -14,9 +14,10 @@ never invent mappings.** Follow this procedure.
    structured segments it returns — not from eyeballing the pipes.
 2. **Build the skeleton.** For ORU^R01, call `hl7_to_fhir_skeleton`. Read its
    `_gaps` array; those are the things you must resolve or flag.
-3. **Resolve terminology.** OBX-3 comes through as pass-through text. Map local
-   codes to LOINC; OBR-4 to LOINC/the ordering system. If you can't confirm a
-   code, mark it UNMAPPED and say so — do not guess a LOINC code.
+3. **Resolve terminology.** OBX-3 codes are copied through (with a `system`
+   only when the message declares one, e.g. `LN` → loinc.org) — not verified.
+   Map local codes to LOINC; OBR-4 to LOINC/the ordering system. If you can't
+   confirm a code, mark it UNMAPPED and say so — do not guess a LOINC code.
 4. **Validate.** Call `validate_fhir` on each resource. Surface every error and
    warning verbatim, then explain it.
 5. **Report** using the structure below.
