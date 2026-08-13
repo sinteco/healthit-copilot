@@ -11,7 +11,8 @@ Tools:
                            (optional: needs java + validator_cli.jar)
   - hl7_to_fhir_skeleton : build a FHIR Bundle from HL7 v2, dispatched on MSH-9
                            (ORU -> DiagnosticReport/Observations, ADT ->
-                           Encounter, ORM -> ServiceRequest)
+                           Encounter, ORM -> ServiceRequest, SIU ->
+                           Appointment, MDM -> DocumentReference)
   - generate_engine_code : emit a Mirth or Rhapsody JS transformer (plain ES5,
                            no E4X) or an FML StructureMap that mirrors the
                            skeleton mapping
@@ -20,6 +21,10 @@ Tools:
   - expand_valueset      : FHIR ValueSet/$expand, incl. VSAC OIDs via
                            $UMLS_API_KEY
   - explain_hl7_field    : version-aware HL7 v2 field dictionary (2.3-2.8)
+  - cda_to_fhir          : map a CDA/CCD XML document to a FHIR Bundle
+                           (Patient, Observations, Conditions, MedicationStatements)
+  - fhir_to_hl7v2        : generate HL7 v2 (ORU/ADT/ORM) from a skeleton Bundle
+  - round_trip_check     : HL7 -> FHIR -> HL7 -> FHIR fidelity diff
 
 NOTE: keep this tool list in sync with TOOLS below — a unit test asserts
 every registered tool name appears here.
@@ -44,8 +49,9 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ET
 
-__version__ = "0.4.1"
+__version__ = "0.5.0"
 
 
 # ----------------------------- MCP plumbing ---------------------------------
@@ -204,6 +210,30 @@ FHIR_RULES = {
         "recommended": ["code", "authoredOn"],
         "status_values": ["draft", "active", "on-hold", "revoked",
                           "completed", "entered-in-error", "unknown"],
+    },
+    "Appointment": {
+        "required": ["status", "participant"],
+        "recommended": ["start", "appointmentType"],
+        "status_values": ["proposed", "pending", "booked", "arrived",
+                          "fulfilled", "cancelled", "noshow",
+                          "entered-in-error", "checked-in", "waitlisted"],
+    },
+    "DocumentReference": {
+        "required": ["status", "content"],
+        "recommended": ["type", "subject", "date"],
+        "status_values": ["current", "superseded", "entered-in-error"],
+    },
+    "Condition": {
+        "required": ["subject"],
+        "recommended": ["code", "clinicalStatus"],
+        "status_values": None,
+    },
+    "MedicationStatement": {
+        "required": ["status", "subject"],
+        "recommended": ["medicationCodeableConcept", "effectivePeriod"],
+        "status_values": ["active", "completed", "entered-in-error",
+                          "intended", "stopped", "on-hold", "unknown",
+                          "not-taken"],
     },
     "Bundle": {
         "required": ["type"],
@@ -420,6 +450,8 @@ def hl7_to_fhir_skeleton(message: str) -> dict:
              NTE -> Observation.note
       - ADT: PID -> Patient, PV1 -> Encounter
       - ORM: PID -> Patient, ORC/OBR -> ServiceRequest
+      - SIU: PID -> Patient, SCH -> Appointment
+      - MDM: PID -> Patient, TXA (+OBX text) -> DocumentReference
 
     Local codes are copied through (with system only when the message declares
     one, e.g. LN -> loinc.org) — NOT translated. The skill layer is
@@ -440,6 +472,10 @@ def hl7_to_fhir_skeleton(message: str) -> dict:
         return _adt_skeleton(segs)
     if msg_type in ("ORM", "OMG", "OML"):
         return _orm_skeleton(segs)
+    if msg_type == "SIU":
+        return _siu_skeleton(segs)
+    if msg_type == "MDM":
+        return _mdm_skeleton(segs)
     return _oru_skeleton(segs)
 
 
@@ -552,6 +588,144 @@ def _orm_skeleton(segs) -> dict:
 
     entries = [_bundle_entry(patient)]
     entries += [_bundle_entry(r) for r in requests_]
+    return {"resourceType": "Bundle", "type": "transaction",
+            "entry": entries, "_gaps": gaps}
+
+
+# SCH-25 filler status (table 0278) -> Appointment.status
+_SCH_STATUS = {"BOOKED": "booked", "PENDING": "pending",
+               "WAITLIST": "waitlisted", "STARTED": "checked-in",
+               "COMPLETE": "fulfilled", "CANCELLED": "cancelled",
+               "NOSHOW": "noshow", "DELETED": "entered-in-error",
+               "BLOCKED": "booked", "OVERBOOK": "booked"}
+
+# TXA-17 completion status (table 0271) -> DocumentReference.docStatus
+_TXA_DOCSTATUS = {"AU": "final", "LA": "final", "DI": "preliminary",
+                  "DO": "preliminary", "IN": "preliminary",
+                  "IP": "preliminary", "PA": "preliminary"}
+
+
+def _siu_skeleton(segs) -> dict:
+    """SIU -> Patient + Appointment."""
+    patient = {"resourceType": "Patient", "id": "patient-1"}
+    appt = None
+    gaps = []
+
+    for s in segs:
+        name, f = s["segment"], s["fields"]
+        if name == "PID":
+            _map_pid(f, patient, gaps)
+        elif name == "SCH":
+            status_raw = _first_comp(_get(f, 25)).upper()
+            status = _SCH_STATUS.get(status_raw, "booked")
+            if status_raw and status_raw not in _SCH_STATUS:
+                gaps.append(f"SCH-25 '{status_raw}' not in HL7 table 0278; "
+                            "status defaulted to 'booked'")
+            appt = {"resourceType": "Appointment", "id": "appointment-1",
+                    "status": status,
+                    "participant": [{"actor": _PATIENT_REF,
+                                     "status": "accepted"}]}
+            identifiers = []
+            placer = _first_comp(_get(f, 1))
+            filler = _first_comp(_get(f, 2))
+            if placer:
+                identifiers.append(
+                    {"type": {"text": "Placer Appointment ID"},
+                     "value": placer})
+            if filler:
+                identifiers.append(
+                    {"type": {"text": "Filler Appointment ID"},
+                     "value": filler})
+            if identifiers:
+                appt["identifier"] = identifiers
+            reason = _get(f, 7)
+            if _first_comp(reason):
+                appt["reasonCode"] = [_coding_from_cwe(reason)]
+            appt_type = _get(f, 8)
+            if _first_comp(appt_type):
+                appt["appointmentType"] = _coding_from_cwe(appt_type)
+            # SCH-11 (TQ): component 4 = start, component 5 = end
+            tq = _get(f, 11)
+            tq = tq if isinstance(tq, list) else [tq]
+            start = _hl7_ts_to_fhir(_flat(tq[3])) if len(tq) > 3 else ""
+            end = _hl7_ts_to_fhir(_flat(tq[4])) if len(tq) > 4 else ""
+            if start:
+                appt["start"] = (start if "T" in start
+                                 else start + "T00:00:00Z")
+            if end:
+                appt["end"] = end if "T" in end else end + "T00:00:00Z"
+
+    if appt is None:
+        gaps.append("No SCH segment; SIU mapped to Patient only")
+    else:
+        if "start" not in appt:
+            gaps.append("SCH-11 start empty; Appointment.start not set")
+        gaps.append("AIS/AIG/AIL/AIP resources (service, provider, "
+                    "location) not mapped; add participants as needed")
+
+    entries = [_bundle_entry(patient)]
+    if appt:
+        entries.append(_bundle_entry(appt))
+    return {"resourceType": "Bundle", "type": "transaction",
+            "entry": entries, "_gaps": gaps}
+
+
+def _mdm_skeleton(segs) -> dict:
+    """MDM -> Patient + DocumentReference (OBX text embedded as content)."""
+    patient = {"resourceType": "Patient", "id": "patient-1"}
+    doc = None
+    text_lines = []
+    gaps = []
+
+    for s in segs:
+        name, f = s["segment"], s["fields"]
+        if name == "PID":
+            _map_pid(f, patient, gaps)
+        elif name == "TXA":
+            avail = _first_comp(_get(f, 19)).upper()
+            doc = {"resourceType": "DocumentReference",
+                   "id": "documentreference-1",
+                   "status": "superseded" if avail == "OB" else "current",
+                   "type": _coding_from_cwe(
+                       _get(f, 2) or "UNMAPPED-TXA-2",
+                       note="Map TXA-2 (table 0270) to a LOINC doc type"),
+                   "subject": _PATIENT_REF}
+            comp_status = _first_comp(_get(f, 17)).upper()
+            if comp_status:
+                doc["docStatus"] = _TXA_DOCSTATUS.get(comp_status,
+                                                      "preliminary")
+                if comp_status not in _TXA_DOCSTATUS:
+                    gaps.append(f"TXA-17 '{comp_status}' not in HL7 table "
+                                "0271; docStatus set to 'preliminary'")
+            uid = _first_comp(_get(f, 12))
+            if uid:
+                doc["identifier"] = [{"value": uid}]
+            when = _hl7_ts_to_fhir(_get(f, 4))
+            if when:
+                doc["date"] = when if "T" in when else when + "T00:00:00Z"
+        elif name == "OBX":
+            vtype = _flat(_get(f, 2))
+            if vtype in ("TX", "ST", "FT"):
+                text_lines.append(_flat(_get(f, 5)))
+
+    if doc is None:
+        gaps.append("No TXA segment; MDM mapped to Patient only")
+    else:
+        if text_lines:
+            data = base64.b64encode(
+                "\n".join(text_lines).encode("utf-8")).decode("ascii")
+            doc["content"] = [{"attachment": {"contentType": "text/plain",
+                                              "data": data}}]
+        else:
+            doc["content"] = [{"attachment": {"contentType": "text/plain"}}]
+            gaps.append("No OBX text segments; DocumentReference.content "
+                        "attachment is empty — attach the document body")
+        gaps.append("TXA-9/22 authenticator/author not mapped "
+                    "(needs Practitioner resolution)")
+
+    entries = [_bundle_entry(patient)]
+    if doc:
+        entries.append(_bundle_entry(doc))
     return {"resourceType": "Bundle", "type": "transaction",
             "entry": entries, "_gaps": gaps}
 
@@ -1469,6 +1643,495 @@ def explain_hl7_field(segment: str, field: int = 0,
                        for n in sorted(fields)]}
 
 
+# ------------------------ CDA / CCD document mapping -------------------------
+
+def _strip_ns(el):
+    """Strip XML namespaces in-place so tags are plain local names."""
+    for e in el.iter():
+        if "}" in e.tag:
+            e.tag = e.tag.split("}", 1)[1]
+    return el
+
+
+def _cda_cc(el):
+    """CodeableConcept from a CDA <code>/<value> element."""
+    if el is None:
+        return None
+    code = el.get("code", "")
+    display = el.get("displayName", "")
+    system_oid = el.get("codeSystem", "")
+    oid_map = {"2.16.840.1.113883.6.1": "http://loinc.org",
+               "2.16.840.1.113883.6.96": "http://snomed.info/sct",
+               "2.16.840.1.113883.6.88":
+                   "http://www.nlm.nih.gov/research/umls/rxnorm",
+               "2.16.840.1.113883.6.90": "http://hl7.org/fhir/sid/icd-10-cm"}
+    cc = {}
+    if code:
+        coding = {"code": code}
+        if display:
+            coding["display"] = display
+        if system_oid:
+            coding["system"] = oid_map.get(system_oid,
+                                           "urn:oid:" + system_oid)
+        cc["coding"] = [coding]
+    if display:
+        cc["text"] = display
+    return cc or None
+
+
+def _cda_ts(value: str) -> str:
+    return _hl7_ts_to_fhir(value or "")
+
+
+# LOINC section codes -> handler kind
+_CDA_SECTIONS = {"30954-2": "results", "8716-3": "results",
+                 "11450-4": "problems", "10160-0": "medications"}
+
+
+def cda_to_fhir(document: str) -> dict:
+    """Map a CDA / CCD XML document to a FHIR R4 transaction Bundle.
+
+    Header -> Patient; Results & Vital Signs sections -> Observations;
+    Problem List -> Conditions; Medications -> MedicationStatements.
+    Unrecognized sections are reported in _gaps, never silently dropped.
+    """
+    try:
+        root = _strip_ns(ET.fromstring(document.strip()))
+    except ET.ParseError as e:
+        return {"error": f"Not well-formed XML: {e}"}
+    if root.tag != "ClinicalDocument":
+        return {"error": "Root element must be ClinicalDocument "
+                         f"(got <{root.tag}>)"}
+
+    gaps = []
+    patient = {"resourceType": "Patient", "id": "patient-1"}
+    role = root.find("recordTarget/patientRole")
+    if role is not None:
+        ids = [{"system": "urn:oid:" + i.get("root"),
+                "value": i.get("extension")}
+               for i in role.findall("id")
+               if i.get("extension") and i.get("root")]
+        if ids:
+            patient["identifier"] = ids
+        p = role.find("patient")
+        if p is not None:
+            name = p.find("name")
+            if name is not None:
+                fam = name.findtext("family", "")
+                giv = [g.text for g in name.findall("given") if g.text]
+                patient["name"] = [{"family": fam, "given": giv}]
+            gender = (p.find("administrativeGenderCode") is not None and
+                      p.find("administrativeGenderCode").get("code", "")) or ""
+            if gender:
+                patient["gender"] = {"M": "male", "F": "female",
+                                     "UN": "unknown"}.get(gender.upper(),
+                                                          "other")
+            birth = p.find("birthTime")
+            if birth is not None and birth.get("value"):
+                bd = _cda_ts(birth.get("value"))
+                if bd:
+                    patient["birthDate"] = bd[:10]
+    else:
+        gaps.append("No recordTarget/patientRole; Patient is empty")
+
+    doc_type = _cda_cc(root.find("code"))
+    resources, obs_n, cond_n, med_n = [], 0, 0, 0
+
+    for comp in root.findall("component/structuredBody/component"):
+        section = comp.find("section")
+        if section is None:
+            continue
+        sec_code_el = section.find("code")
+        sec_code = sec_code_el.get("code", "") if sec_code_el is not None \
+            else ""
+        title = section.findtext("title", sec_code)
+        kind = _CDA_SECTIONS.get(sec_code)
+        if kind == "results":
+            for ob in section.iter("observation"):
+                obs_n += 1
+                obs = {"resourceType": "Observation", "id": f"obs-{obs_n}",
+                       "status": "final", "subject": _PATIENT_REF}
+                code = _cda_cc(ob.find("code"))
+                obs["code"] = code or {"text": f"UNMAPPED ({title})"}
+                st = ob.find("statusCode")
+                if st is not None and st.get("code") == "active":
+                    obs["status"] = "preliminary"
+                val = ob.find("value")
+                if val is not None:
+                    xsi = [v for k, v in val.attrib.items()
+                           if k.endswith("type")]
+                    vtype = xsi[0] if xsi else ""
+                    if vtype.endswith("PQ") or val.get("unit"):
+                        try:
+                            q = {"value": float(val.get("value", ""))}
+                            unit = val.get("unit", "")
+                            if unit:
+                                q["unit"] = unit
+                            obs["valueQuantity"] = q
+                        except ValueError:
+                            obs["valueString"] = val.get("value", "")
+                    elif vtype.endswith("CD"):
+                        vcc = _cda_cc(val)
+                        if vcc:
+                            obs["valueCodeableConcept"] = vcc
+                    elif val.get("value"):
+                        obs["valueString"] = val.get("value")
+                    elif val.text and val.text.strip():
+                        obs["valueString"] = val.text.strip()
+                eff = ob.find("effectiveTime")
+                if eff is not None and eff.get("value"):
+                    ts = _cda_ts(eff.get("value"))
+                    if ts:
+                        obs["effectiveDateTime"] = ts
+                interp = ob.find("interpretationCode")
+                if interp is not None and interp.get("code"):
+                    obs["interpretation"] = [{"coding": [{
+                        "system": "http://terminology.hl7.org/CodeSystem/"
+                                  "v3-ObservationInterpretation",
+                        "code": interp.get("code")}]}]
+                resources.append(obs)
+        elif kind == "problems":
+            for ob in section.iter("observation"):
+                val = ob.find("value")
+                ccode = _cda_cc(val)
+                if not ccode:
+                    continue
+                cond_n += 1
+                cond = {"resourceType": "Condition",
+                        "id": f"condition-{cond_n}",
+                        "code": ccode, "subject": _PATIENT_REF}
+                eff = ob.find("effectiveTime/low")
+                if eff is not None and eff.get("value"):
+                    ts = _cda_ts(eff.get("value"))
+                    if ts:
+                        cond["onsetDateTime"] = ts
+                resources.append(cond)
+            gaps.append("Problem act statusCode not mapped to "
+                        "Condition.clinicalStatus; review before use")
+        elif kind == "medications":
+            for sa in section.iter("substanceAdministration"):
+                mat = sa.find("consumable/manufacturedProduct/"
+                              "manufacturedMaterial/code")
+                mcc = _cda_cc(mat)
+                if not mcc:
+                    continue
+                med_n += 1
+                ms = {"resourceType": "MedicationStatement",
+                      "id": f"medicationstatement-{med_n}",
+                      "status": "active",
+                      "medicationCodeableConcept": mcc,
+                      "subject": _PATIENT_REF}
+                st = sa.find("statusCode")
+                if st is not None and st.get("code") == "completed":
+                    ms["status"] = "completed"
+                low = sa.find("effectiveTime/low")
+                high = sa.find("effectiveTime/high")
+                period = {}
+                if low is not None and low.get("value"):
+                    period["start"] = _cda_ts(low.get("value"))
+                if high is not None and high.get("value"):
+                    period["end"] = _cda_ts(high.get("value"))
+                if period:
+                    ms["effectivePeriod"] = period
+                resources.append(ms)
+        else:
+            gaps.append(f"Section '{title}' (LOINC {sec_code or '??'}) "
+                        "not mapped — handle manually if needed")
+
+    if not resources:
+        gaps.append("No mappable entries found in Results/Problems/"
+                    "Medications sections")
+    gaps.append("CDA narrative text not carried over; only structured "
+                "entries are mapped")
+
+    bundle = {"resourceType": "Bundle", "type": "transaction",
+              "entry": [_bundle_entry(patient)]
+              + [_bundle_entry(r) for r in resources],
+              "_gaps": gaps}
+    if doc_type:
+        bundle["_document_type"] = doc_type
+    return bundle
+
+
+# ------------------------ FHIR -> HL7 v2 round trip --------------------------
+
+def _escape_hl7(text: str) -> str:
+    """Re-encode HL7 escape sequences for message generation."""
+    return (str(text).replace("\\", "\\E\\").replace("|", "\\F\\")
+            .replace("^", "\\S\\").replace("~", "\\R\\")
+            .replace("&", "\\T\\").replace("\n", "\\.br\\"))
+
+
+def _fhir_ts_to_hl7(ts: str) -> str:
+    """FHIR date/dateTime -> HL7 TS (drops 'Z', keeps +/-HHMM offsets)."""
+    ts = str(ts or "")
+    if ts.endswith("Z"):
+        ts = ts[:-1]
+    m = re.match(r"^(\d{4})(?:-(\d{2}))?(?:-(\d{2}))?"
+                 r"(?:T(\d{2}):(\d{2})(?::(\d{2}))?"
+                 r"(?:([+-]\d{2}):?(\d{2})?)?)?$",
+                 ts)
+    if not m:
+        return ""
+    y, mo, d, h, mi, s, tzh, tzm = m.groups()
+    out = y + (mo or "") + (d or "")
+    if h:
+        out += h + (mi or "00") + (s or "00")
+    if tzh:
+        out += tzh + (tzm or "00")
+    return out
+
+
+def _cc_to_hl7(cc) -> str:
+    """CodeableConcept -> code^display^system HL7 field."""
+    if not isinstance(cc, dict):
+        return _escape_hl7(cc or "")
+    codings = cc.get("coding") or []
+    if codings:
+        c = codings[0]
+        system = c.get("system", "")
+        if system == "http://loinc.org":
+            system = "LN"
+        parts = [c.get("code", ""), c.get("display", ""), system]
+        while parts and not parts[-1]:
+            parts.pop()
+        return "^".join(_escape_hl7(p) for p in parts)
+    return _escape_hl7(cc.get("text", ""))
+
+
+_REV_GENDER = {"female": "F", "male": "M", "other": "O", "unknown": "U"}
+_REV_OBX_STATUS = {"final": "F", "corrected": "C", "preliminary": "P",
+                   "registered": "R", "entered-in-error": "W",
+                   "cancelled": "X", "amended": "A"}
+_REV_OBR_STATUS = {"final": "F", "corrected": "C", "preliminary": "P",
+                   "registered": "I", "partial": "A", "cancelled": "X",
+                   "unknown": "Y"}
+_REV_ENC_CLASS = {"IMP": "I", "AMB": "O", "EMER": "E", "PRENC": "P",
+                  "NONAC": "N"}
+_REV_ORC_STATUS = {"active": "A", "revoked": "CA", "completed": "CM",
+                   "entered-in-error": "ER", "on-hold": "HD"}
+
+
+def _seg_join(name, fields):
+    """Build a segment string from a {1-based index: value} dict."""
+    top = max(fields) if fields else 0
+    parts = [name] + [""] * top
+    for i, v in fields.items():
+        parts[i] = v
+    return "|".join(parts)
+
+
+def _msh(msg_type: str, receiver: str) -> str:
+    """Build a spec-correct MSH (MSH-1 is the separator itself)."""
+    return "|".join(["MSH", "^~\\&", "HEALTHIT", "", receiver, "",
+                     "20240101000000", "", msg_type, "RT1", "P", "2.5"])
+
+
+def _pid_from_patient(patient) -> str:
+    f = {1: "1"}
+    ids = [i.get("value", "") for i in patient.get("identifier", [])
+           if i.get("value")]
+    if len(ids) > 1:
+        # a component suffix keeps each repetition unambiguous when parsed
+        f[3] = "~".join(_escape_hl7(i) + "^^^^" for i in ids)
+    elif ids:
+        f[3] = _escape_hl7(ids[0])
+    names = patient.get("name") or []
+    if names:
+        nm = names[0]
+        given = nm.get("given") or [""]
+        f[5] = (_escape_hl7(nm.get("family", "")) + "^"
+                + _escape_hl7(given[0] if given else ""))
+    if patient.get("birthDate"):
+        f[7] = _fhir_ts_to_hl7(patient["birthDate"])
+    if patient.get("gender"):
+        f[8] = _REV_GENDER.get(patient["gender"], "U")
+    return _seg_join("PID", f)
+
+
+def fhir_to_hl7v2(bundle) -> dict:
+    """Generate an HL7 v2 message from a skeleton-shaped FHIR Bundle.
+
+    Inverse of hl7_to_fhir_skeleton for ORU (DiagnosticReport/Observation),
+    ADT (Encounter), and ORM (ServiceRequest) Bundles. Intended for
+    round-trip interface testing, not production message generation.
+    """
+    if isinstance(bundle, str):
+        try:
+            bundle = json.loads(bundle)
+        except json.JSONDecodeError as e:
+            return {"error": f"Invalid JSON: {e}"}
+    if not isinstance(bundle, dict) or \
+            bundle.get("resourceType") != "Bundle":
+        return {"error": "Input must be a FHIR Bundle"}
+
+    by_type = {}
+    for e in bundle.get("entry", []):
+        r = e.get("resource", {})
+        by_type.setdefault(r.get("resourceType", ""), []).append(r)
+
+    patient = (by_type.get("Patient") or [{}])[0]
+
+    if by_type.get("Encounter"):
+        enc = by_type["Encounter"][0]
+        msh = _msh("ADT^A01", "EMR")
+        f = {1: "1", 2: _REV_ENC_CLASS.get(
+            (enc.get("class") or {}).get("code", ""), "O")}
+        ids = enc.get("identifier") or []
+        if ids and ids[0].get("value"):
+            f[19] = _escape_hl7(ids[0]["value"])
+        period = enc.get("period") or {}
+        if period.get("start"):
+            f[44] = _fhir_ts_to_hl7(period["start"])
+        if period.get("end"):
+            f[45] = _fhir_ts_to_hl7(period["end"])
+        return {"message_type": "ADT^A01",
+                "message": "\r".join(
+                    [msh, _pid_from_patient(patient),
+                     _seg_join("PV1", f)])}
+
+    if by_type.get("ServiceRequest"):
+        segs = [_msh("ORM^O01", "LAB"),
+                _pid_from_patient(patient)]
+        for sr in by_type["ServiceRequest"]:
+            placer = filler = ""
+            for ident in sr.get("identifier", []):
+                label = (ident.get("type") or {}).get("text", "")
+                if "Placer" in label:
+                    placer = ident.get("value", "")
+                elif "Filler" in label:
+                    filler = ident.get("value", "")
+            orc = {1: "NW"}
+            if placer:
+                orc[2] = _escape_hl7(placer)
+            if filler:
+                orc[3] = _escape_hl7(filler)
+            status = _REV_ORC_STATUS.get(sr.get("status", ""))
+            if status:
+                orc[5] = status
+            if sr.get("authoredOn"):
+                orc[9] = _fhir_ts_to_hl7(sr["authoredOn"])
+            segs.append(_seg_join("ORC", orc))
+            obr = {1: "1", 4: _cc_to_hl7(sr.get("code"))}
+            if placer:
+                obr[2] = _escape_hl7(placer)
+            if filler:
+                obr[3] = _escape_hl7(filler)
+            if sr.get("occurrenceDateTime"):
+                obr[7] = _fhir_ts_to_hl7(sr["occurrenceDateTime"])
+            segs.append(_seg_join("OBR", obr))
+        return {"message_type": "ORM^O01", "message": "\r".join(segs)}
+
+    # default: ORU
+    segs = [_msh("ORU^R01", "EMR"),
+            _pid_from_patient(patient)]
+    reports = by_type.get("DiagnosticReport") or []
+    if reports:
+        rep = reports[0]
+        f = {1: "1", 4: _cc_to_hl7(rep.get("code"))}
+        if rep.get("effectiveDateTime"):
+            f[7] = _fhir_ts_to_hl7(rep["effectiveDateTime"])
+        if rep.get("issued"):
+            f[22] = _fhir_ts_to_hl7(rep["issued"])
+        f[25] = _REV_OBR_STATUS.get(rep.get("status", "final"), "F")
+        segs.append(_seg_join("OBR", f))
+    for n, obs in enumerate(by_type.get("Observation") or [], 1):
+        f = {1: str(n), 3: _cc_to_hl7(obs.get("code"))}
+        if "valueQuantity" in obs:
+            q = obs["valueQuantity"]
+            comparator = q.get("comparator", "")
+            f[2] = "SN" if comparator else "NM"
+            val = q.get("value", "")
+            if isinstance(val, float) and val.is_integer():
+                val = int(val)
+            f[5] = (comparator + "^" + str(val)) if comparator else str(val)
+            if q.get("unit"):
+                f[6] = _escape_hl7(q["unit"])
+        elif "valueCodeableConcept" in obs:
+            f[2] = "CE"
+            f[5] = _cc_to_hl7(obs["valueCodeableConcept"])
+        elif "valueString" in obs:
+            f[2] = "ST"
+            f[5] = _escape_hl7(obs["valueString"])
+        rr = obs.get("referenceRange") or []
+        if rr and rr[0].get("text"):
+            f[7] = _escape_hl7(rr[0]["text"])
+        interp = obs.get("interpretation") or []
+        if interp:
+            codings = interp[0].get("coding") or []
+            if codings and codings[0].get("code"):
+                f[8] = codings[0]["code"]
+        f[11] = _REV_OBX_STATUS.get(obs.get("status", "final"), "F")
+        if obs.get("effectiveDateTime"):
+            f[14] = _fhir_ts_to_hl7(obs["effectiveDateTime"])
+        segs.append(_seg_join("OBX", f))
+        for note in obs.get("note") or []:
+            if note.get("text"):
+                segs.append(_seg_join(
+                    "NTE", {1: "1", 3: _escape_hl7(note["text"])}))
+    return {"message_type": "ORU^R01", "message": "\r".join(segs)}
+
+
+def _strip_underscore(obj):
+    """Drop _-prefixed keys recursively (advisory fields like _gaps)."""
+    if isinstance(obj, dict):
+        return {k: _strip_underscore(v) for k, v in obj.items()
+                if not k.startswith("_")}
+    if isinstance(obj, list):
+        return [_strip_underscore(x) for x in obj]
+    return obj
+
+
+def round_trip_check(message: str) -> dict:
+    """HL7 -> FHIR -> HL7 -> FHIR; diff the two Bundles.
+
+    A lossless round trip means the mapping preserves everything it claims
+    to map. Differences point at fields that would be dropped or mangled
+    by the generated interface.
+    """
+    b1 = hl7_to_fhir_skeleton(message)
+    if "error" in b1 and "resourceType" not in b1:
+        return b1
+    gen = fhir_to_hl7v2(b1)
+    if "error" in gen:
+        return gen
+    b2 = hl7_to_fhir_skeleton(gen["message"])
+    if "error" in b2 and "resourceType" not in b2:
+        return {"error": "Regenerated message failed to parse: "
+                + b2["error"], "regenerated_message": gen["message"]}
+
+    def diff(a, b, path="$"):
+        out = []
+        if type(a) is not type(b):
+            return [f"{path}: type {type(a).__name__} -> "
+                    f"{type(b).__name__}"]
+        if isinstance(a, dict):
+            for k in sorted(set(a) | set(b)):
+                if k not in a:
+                    out.append(f"{path}.{k}: added")
+                elif k not in b:
+                    out.append(f"{path}.{k}: lost")
+                else:
+                    out += diff(a[k], b[k], f"{path}.{k}")
+        elif isinstance(a, list):
+            if len(a) != len(b):
+                out.append(f"{path}: length {len(a)} -> {len(b)}")
+            out += [d for x, y in zip(a, b)
+                    for d in diff(x, y, path + "[]")]
+        elif a != b:
+            out.append(f"{path}: {a!r} -> {b!r}")
+        return out
+
+    differences = diff(_strip_underscore(b1), _strip_underscore(b2))
+    return {"round_trip_ok": not differences,
+            "differences": differences,
+            "regenerated_message": gen["message"],
+            "note": ("Lossless: every mapped field survives HL7 -> FHIR -> "
+                     "HL7 -> FHIR" if not differences else
+                     "Fields listed in 'differences' would drift through "
+                     "the mapping — review before go-live")}
+
+
 # ----------------------------- dispatch -------------------------------------
 
 TOOLS = [
@@ -1552,6 +2215,32 @@ TOOLS = [
                                     "field": {"type": "integer"},
                                     "version": {"type": "string"}},
                      "required": ["segment"]}},
+    {"name": "cda_to_fhir",
+     "description": "Map a CDA / CCD XML document to a FHIR R4 transaction "
+                    "Bundle: header -> Patient, Results/Vitals -> "
+                    "Observations, Problem List -> Conditions, Medications "
+                    "-> MedicationStatements. Unmapped sections are "
+                    "reported in _gaps.",
+     "inputSchema": {"type": "object",
+                     "properties": {"document": {"type": "string"}},
+                     "required": ["document"]}},
+    {"name": "fhir_to_hl7v2",
+     "description": "Generate an HL7 v2 message (ORU/ADT/ORM) from a "
+                    "skeleton-shaped FHIR Bundle — the inverse of "
+                    "hl7_to_fhir_skeleton, for round-trip interface "
+                    "testing.",
+     "inputSchema": {"type": "object",
+                     "properties": {"bundle": {"type": ["object",
+                                                        "string"]}},
+                     "required": ["bundle"]}},
+    {"name": "round_trip_check",
+     "description": "Verify mapping fidelity: HL7 -> FHIR -> HL7 -> FHIR "
+                    "and diff the two Bundles. Empty 'differences' means "
+                    "the mapping is lossless for everything it claims to "
+                    "map.",
+     "inputSchema": {"type": "object",
+                     "properties": {"message": {"type": "string"}},
+                     "required": ["message"]}},
 ]
 
 HANDLERS = {
@@ -1570,6 +2259,9 @@ HANDLERS = {
         a.get("count", 20), a.get("server", "")),
     "explain_hl7_field": lambda a: explain_hl7_field(
         a["segment"], a.get("field", 0), a.get("version", "2.5")),
+    "cda_to_fhir": lambda a: cda_to_fhir(a["document"]),
+    "fhir_to_hl7v2": lambda a: fhir_to_hl7v2(a["bundle"]),
+    "round_trip_check": lambda a: round_trip_check(a["message"]),
 }
 
 
