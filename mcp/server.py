@@ -26,6 +26,7 @@ Design notes:
 
 import sys
 import json
+import base64
 import os
 import re
 import shutil
@@ -35,7 +36,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-__version__ = "0.2.1"
+__version__ = "0.3.0"
 
 
 # ----------------------------- MCP plumbing ---------------------------------
@@ -181,6 +182,19 @@ FHIR_RULES = {
     "Patient": {
         "required": [],
         "recommended": ["identifier", "name"],
+    },
+    "Encounter": {
+        "required": ["status", "class"],
+        "recommended": ["subject", "period"],
+        "status_values": ["planned", "arrived", "triaged", "in-progress",
+                          "onleave", "finished", "cancelled",
+                          "entered-in-error", "unknown"],
+    },
+    "ServiceRequest": {
+        "required": ["status", "intent", "subject"],
+        "recommended": ["code", "authoredOn"],
+        "status_values": ["draft", "active", "on-hold", "revoked",
+                          "completed", "entered-in-error", "unknown"],
     },
     "Bundle": {
         "required": ["type"],
@@ -341,20 +355,200 @@ def _coding_from_cwe(field, note=None):
     return cc
 
 
-def hl7_to_fhir_skeleton(message: str) -> dict:
-    """Turn an ORU^R01 into a FHIR transaction Bundle skeleton.
+def _map_pid(f, patient, gaps):
+    """Map a PID segment's fields into a Patient resource (shared)."""
+    pid3 = _get(f, 3)
+    if pid3:
+        reps = pid3 if (isinstance(pid3, list)
+                        and isinstance(pid3[0], list)) else [pid3]
+        patient["identifier"] = [{"value": _first_comp(r)} for r in reps
+                                 if _first_comp(r)]
+    pid5 = _get(f, 5)
+    if pid5:
+        comps = pid5 if isinstance(pid5, list) else [pid5]
+        patient["name"] = [{"family": _flat(comps[0]) if comps else "",
+                            "given": [_flat(comps[1])] if len(comps) > 1 else []}]
+    bd = _hl7_ts_to_fhir(_get(f, 7))
+    if bd:
+        patient["birthDate"] = bd[:10]
+    sex = _first_comp(_get(f, 8)).upper()
+    if sex:
+        patient["gender"] = _GENDER.get(sex, "unknown")
+        if sex not in _GENDER:
+            gaps.append(f"PID-8 '{sex}' not in HL7 table 0001; "
+                        "mapped to 'unknown'")
 
-    Maps: PID -> Patient, OBR -> DiagnosticReport, each OBX -> Observation,
-    NTE -> Observation.note. Local OBX-3/OBR-4 codes are copied through (with
-    system only when the message declares one, e.g. LN -> loinc.org) — NOT
-    translated. The skill layer is responsible for terminology resolution +
-    gap analysis.
+
+def _bundle_entry(resource):
+    rt = resource["resourceType"]
+    return {"fullUrl": f"urn:uuid:{resource['id']}",
+            "resource": resource,
+            "request": {"method": "POST", "url": rt}}
+
+
+_PATIENT_REF = {"reference": "urn:uuid:patient-1"}
+
+# PV1-2 patient class (table 0004) -> Encounter.class (v3-ActCode)
+_ENC_CLASS = {"I": ("IMP", "inpatient encounter"),
+              "O": ("AMB", "ambulatory"),
+              "E": ("EMER", "emergency"),
+              "P": ("PRENC", "pre-admission"),
+              "R": ("AMB", "ambulatory"),
+              "B": ("AMB", "ambulatory"),
+              "N": ("NONAC", "inactive")}
+
+# ORC-5 order status (table 0038) -> ServiceRequest.status
+_ORC_STATUS = {"A": "active", "CA": "revoked", "CM": "completed",
+               "DC": "revoked", "ER": "entered-in-error", "HD": "on-hold",
+               "IP": "active", "RP": "active", "SC": "active"}
+
+
+def hl7_to_fhir_skeleton(message: str) -> dict:
+    """Turn an HL7 v2 message into a FHIR transaction Bundle skeleton.
+
+    Supported message types (from MSH-9):
+      - ORU: PID -> Patient, OBR -> DiagnosticReport, OBX -> Observation,
+             NTE -> Observation.note
+      - ADT: PID -> Patient, PV1 -> Encounter
+      - ORM: PID -> Patient, ORC/OBR -> ServiceRequest
+
+    Local codes are copied through (with system only when the message declares
+    one, e.g. LN -> loinc.org) — NOT translated. The skill layer is
+    responsible for terminology resolution + gap analysis.
     """
     parsed = parse_hl7v2(message)
     if "error" in parsed:
         return parsed
     segs = parsed["segments"]
 
+    msg_type = ""
+    for s in segs:
+        if s["segment"] == "MSH" and len(s["fields"]) > 8:
+            msg_type = _first_comp(s["fields"][8]).upper()
+            break
+
+    if msg_type == "ADT":
+        return _adt_skeleton(segs)
+    if msg_type in ("ORM", "OMG", "OML"):
+        return _orm_skeleton(segs)
+    return _oru_skeleton(segs)
+
+
+def _adt_skeleton(segs) -> dict:
+    """ADT -> Patient + Encounter."""
+    patient = {"resourceType": "Patient", "id": "patient-1"}
+    encounter = None
+    gaps = []
+
+    for s in segs:
+        name, f = s["segment"], s["fields"]
+        if name == "PID":
+            _map_pid(f, patient, gaps)
+        elif name == "PV1":
+            cls = _first_comp(_get(f, 2)).upper()
+            code, display = _ENC_CLASS.get(cls, ("AMB", "ambulatory"))
+            if cls and cls not in _ENC_CLASS:
+                gaps.append(f"PV1-2 '{cls}' not in HL7 table 0004; "
+                            "class defaulted to AMB")
+            encounter = {"resourceType": "Encounter", "id": "encounter-1",
+                         "status": "in-progress",
+                         "class": {"system": "http://terminology.hl7.org/"
+                                             "CodeSystem/v3-ActCode",
+                                   "code": code, "display": display},
+                         "subject": _PATIENT_REF}
+            visit = _first_comp(_get(f, 19))
+            if visit:
+                encounter["identifier"] = [{"value": visit}]
+            start = _hl7_ts_to_fhir(_get(f, 44))
+            end = _hl7_ts_to_fhir(_get(f, 45))
+            if start or end:
+                period = {}
+                if start:
+                    period["start"] = start
+                if end:
+                    period["end"] = end
+                    encounter["status"] = "finished"
+                encounter["period"] = period
+
+    if encounter is None:
+        gaps.append("No PV1 segment; ADT mapped to Patient only")
+    else:
+        if "period" not in encounter:
+            gaps.append("PV1-44/45 empty; Encounter.period not set")
+        gaps.append("PV1-7/17 attending/admitting not mapped "
+                    "(needs Practitioner resolution)")
+
+    entries = [_bundle_entry(patient)]
+    if encounter:
+        entries.append(_bundle_entry(encounter))
+    return {"resourceType": "Bundle", "type": "transaction",
+            "entry": entries, "_gaps": gaps}
+
+
+def _orm_skeleton(segs) -> dict:
+    """ORM/OMG/OML -> Patient + ServiceRequest(s)."""
+    patient = {"resourceType": "Patient", "id": "patient-1"}
+    requests_, current_orc = [], None
+    gaps = ["OBR-4/ORC codes are pass-through, not verified against the "
+            "order catalog / LOINC"]
+
+    for s in segs:
+        name, f = s["segment"], s["fields"]
+        if name == "PID":
+            _map_pid(f, patient, gaps)
+        elif name == "ORC":
+            current_orc = f
+        elif name == "OBR":
+            n = len(requests_) + 1
+            sr = {"resourceType": "ServiceRequest", "id": f"servicerequest-{n}",
+                  "status": "active", "intent": "order",
+                  "code": _coding_from_cwe(
+                      _get(f, 4) or "UNMAPPED-OBR-4",
+                      note="Verify OBR-4 against LOINC / order catalog"),
+                  "subject": _PATIENT_REF}
+            identifiers = []
+            placer = _first_comp(_get(f, 2)) or (
+                _first_comp(_get(current_orc, 2)) if current_orc else "")
+            filler = _first_comp(_get(f, 3)) or (
+                _first_comp(_get(current_orc, 3)) if current_orc else "")
+            if placer:
+                identifiers.append({"type": {"text": "Placer Order Number"},
+                                    "value": placer})
+            if filler:
+                identifiers.append({"type": {"text": "Filler Order Number"},
+                                    "value": filler})
+            if identifiers:
+                sr["identifier"] = identifiers
+            if current_orc:
+                oc5 = _first_comp(_get(current_orc, 5)).upper()
+                if oc5:
+                    sr["status"] = _ORC_STATUS.get(oc5, "unknown")
+                    if oc5 not in _ORC_STATUS:
+                        gaps.append(f"ORC-5 '{oc5}' not in HL7 table 0038; "
+                                    "status mapped to 'unknown'")
+                authored = _hl7_ts_to_fhir(_get(current_orc, 9))
+                if authored:
+                    sr["authoredOn"] = (authored if "T" in authored
+                                        else authored + "T00:00:00Z")
+            occurrence = _hl7_ts_to_fhir(_get(f, 7))
+            if occurrence:
+                sr["occurrenceDateTime"] = occurrence
+            requests_.append(sr)
+
+    if not requests_:
+        gaps.append("No OBR segment; order mapped to Patient only")
+    else:
+        gaps.append("ORC-12/OBR-16 ordering provider not mapped "
+                    "(needs Practitioner resolution)")
+
+    entries = [_bundle_entry(patient)]
+    entries += [_bundle_entry(r) for r in requests_]
+    return {"resourceType": "Bundle", "type": "transaction",
+            "entry": entries, "_gaps": gaps}
+
+
+def _oru_skeleton(segs) -> dict:
+    """ORU -> Patient + DiagnosticReport + Observations."""
     patient = {"resourceType": "Patient", "id": "patient-1"}
     observations, obr = [], None
     obs_refs = []
@@ -364,26 +558,7 @@ def hl7_to_fhir_skeleton(message: str) -> dict:
     for s in segs:
         name, f = s["segment"], s["fields"]
         if name == "PID":
-            pid3 = _get(f, 3)
-            if pid3:
-                reps = pid3 if (isinstance(pid3, list)
-                                and isinstance(pid3[0], list)) else [pid3]
-                patient["identifier"] = [{"value": _first_comp(r)} for r in reps
-                                         if _first_comp(r)]
-            pid5 = _get(f, 5)
-            if pid5:
-                comps = pid5 if isinstance(pid5, list) else [pid5]
-                patient["name"] = [{"family": _flat(comps[0]) if comps else "",
-                                    "given": [_flat(comps[1])] if len(comps) > 1 else []}]
-            bd = _hl7_ts_to_fhir(_get(f, 7))
-            if bd:
-                patient["birthDate"] = bd[:10]
-            sex = _first_comp(_get(f, 8)).upper()
-            if sex:
-                patient["gender"] = _GENDER.get(sex, "unknown")
-                if sex not in _GENDER:
-                    gaps.append(f"PID-8 '{sex}' not in HL7 table 0001; "
-                                "mapped to 'unknown'")
+            _map_pid(f, patient, gaps)
         elif name == "OBR":
             obr_status = _first_comp(_get(f, 25)).upper()
             obr = {"resourceType": "DiagnosticReport", "id": "report-1",
@@ -456,22 +631,15 @@ def hl7_to_fhir_skeleton(message: str) -> dict:
         if "effectiveDateTime" not in obr:
             gaps.append("OBR-7 empty; DiagnosticReport.effective[x] not set")
 
-    def entry(resource):
-        rt = resource["resourceType"]
-        return {"fullUrl": f"urn:uuid:{resource['id']}",
-                "resource": resource,
-                "request": {"method": "POST", "url": rt}}
-
-    patient_ref = {"reference": "urn:uuid:patient-1"}
     if obr:
-        obr["subject"] = patient_ref
+        obr["subject"] = _PATIENT_REF
     for o in observations:
-        o["subject"] = patient_ref
+        o["subject"] = _PATIENT_REF
 
-    entries = [entry(patient)]
+    entries = [_bundle_entry(patient)]
     if obr:
-        entries.append(entry(obr))
-    entries += [entry(o) for o in observations]
+        entries.append(_bundle_entry(obr))
+    entries += [_bundle_entry(o) for o in observations]
 
     return {"resourceType": "Bundle", "type": "transaction",
             "entry": entries,
@@ -497,8 +665,9 @@ def generate_engine_code(message: str, target: str = "mirth") -> dict:
     behavior matches what was reviewed in Claude Code.
     """
     target = (target or "mirth").lower()
-    if target not in ("mirth", "rhapsody"):
-        return {"error": f"Unknown target '{target}'. Use 'mirth' or 'rhapsody'."}
+    if target not in ("mirth", "rhapsody", "fml"):
+        return {"error": f"Unknown target '{target}'. "
+                         "Use 'mirth', 'rhapsody', or 'fml'."}
 
     parsed = parse_hl7v2(message)
     if "error" in parsed:
@@ -524,6 +693,19 @@ def generate_engine_code(message: str, target: str = "mirth") -> dict:
             "OBX-3 codes are copied through — wire your site's code map or a "
             "terminology service before go-live.",
         ]
+    elif target == "fml":
+        code = _fml_structuremap()
+        notes = [
+            "FHIR Mapping Language StructureMap: run with the HL7 validator "
+            "CLI (java -jar validator_cli.jar msg.json -transform "
+            "http://healthit.example/StructureMap/ORU-to-Bundle -ig map.fml) "
+            "or a matchbox/StructureMap engine.",
+            "Source model follows the HL7 v2-to-FHIR IG logical model "
+            "(ORU_R01 message structure); align your v2 parser's logical "
+            "model names before executing.",
+            "OBX-3/OBR-4 codes are copied through — insert ConceptMap-based "
+            "translate() calls for production terminology.",
+        ]
     else:
         code = _rhapsody_mapper()
         notes = [
@@ -535,10 +717,76 @@ def generate_engine_code(message: str, target: str = "mirth") -> dict:
             "local-to-LOINC translation.",
         ]
 
-    return {"target": target, "language": "javascript",
+    return {"target": target,
+            "language": "fml" if target == "fml" else "javascript",
             "message_profile": {"segments": seg_counts, "obx_count": n_obx,
                                 "has_pid": has_pid, "has_obr": has_obr},
             "code": code, "notes": notes}
+
+
+FML_MAP = r"""/// FHIR Mapping Language StructureMap: ORU^R01 -> FHIR R4 transaction Bundle
+/// Mirrors hl7_to_fhir_skeleton. Source logical model: HL7 v2-to-FHIR IG
+/// message structure (ORU_R01). Execute with the HL7 validator CLI or matchbox.
+map "http://healthit.example/StructureMap/ORU-to-Bundle" = "ORUtoBundle"
+
+uses "http://hl7.org/fhir/uv/v2mappings/StructureDefinition/ORU_R01" alias ORU_R01 as source
+uses "http://hl7.org/fhir/StructureDefinition/Bundle" alias Bundle as target
+uses "http://hl7.org/fhir/StructureDefinition/Patient" alias Patient as produced
+uses "http://hl7.org/fhir/StructureDefinition/DiagnosticReport" alias DiagnosticReport as produced
+uses "http://hl7.org/fhir/StructureDefinition/Observation" alias Observation as produced
+
+group ORUtoBundle(source msg : ORU_R01, target bundle : Bundle) {
+  msg -> bundle.type = 'transaction' "bundle-type";
+  msg.patientResult as pr -> bundle then {
+    pr.patient as pat then PatientGroup(pat, bundle) "map-patient";
+    pr.orderObservation as oo then OrderGroup(oo, bundle) "map-order";
+  } "patient-result";
+}
+
+group PatientGroup(source pat, target bundle : Bundle) {
+  pat.PID as pid -> bundle.entry as e, e.resource = create('Patient') as p,
+      e.request as rq, rq.method = 'POST', rq.url = 'Patient' then {
+    pid.field3 as cx -> p.identifier as id, id.value = (cx.component1) "pid3-identifier";
+    pid.field5 as xpn -> p.name as n,
+        n.family = (xpn.component1), n.given = (xpn.component2) "pid5-name";
+    pid.field7 as ts -> p.birthDate = truncate(ts, 10) "pid7-birthdate";
+    pid.field8 as sex -> p.gender = translate(sex, 'http://healthit.example/ConceptMap/table0001-to-gender', 'code') "pid8-gender";
+  } "pid-to-patient";
+}
+
+group OrderGroup(source oo, target bundle : Bundle) {
+  oo.OBR as obr -> bundle.entry as e, e.resource = create('DiagnosticReport') as dr,
+      e.request as rq, rq.method = 'POST', rq.url = 'DiagnosticReport' then {
+    obr.field25 as st -> dr.status = translate(st, 'http://healthit.example/ConceptMap/table0123-to-report-status', 'code') "obr25-status";
+    obr.field4 as cwe -> dr.code = create('CodeableConcept') as cc,
+        cc.coding as c, c.code = (cwe.component1), c.display = (cwe.component2) "obr4-code";
+    obr.field7 as ts -> dr.effective = (ts) "obr7-effective";
+    obr.field22 as ts -> dr.issued = (ts) "obr22-issued";
+  } "obr-to-report";
+  oo.observation as obsg then {
+    obsg.OBX as obx -> bundle.entry as e, e.resource = create('Observation') as ob,
+        e.request as rq, rq.method = 'POST', rq.url = 'Observation' then {
+      obx.field11 as st -> ob.status = translate(st, 'http://healthit.example/ConceptMap/table0085-to-obs-status', 'code') "obx11-status";
+      obx.field3 as cwe -> ob.code = create('CodeableConcept') as cc,
+          cc.coding as c, c.code = (cwe.component1), c.display = (cwe.component2) "obx3-code";
+      obx.field5 as v where obx.field2 = 'NM' -> ob.value = create('Quantity') as q,
+          q.value = (v), q.unit = (obx.field6.component1) "obx5-nm-quantity";
+      obx.field5 as v where obx.field2 = 'ST' or obx.field2 = 'TX' or obx.field2 = 'FT'
+          -> ob.value = (v) "obx5-string";
+      obx.field5 as v where obx.field2 = 'CE' or obx.field2 = 'CWE'
+          -> ob.value = create('CodeableConcept') as cc,
+          cc.coding as c, c.code = (v.component1), c.display = (v.component2) "obx5-coded";
+      obx.field7 as rr -> ob.referenceRange as r, r.text = (rr) "obx7-refrange";
+      obx.field8 as it -> ob.interpretation = cc('http://terminology.hl7.org/CodeSystem/v3-ObservationInterpretation', it) "obx8-interp";
+      obx.field14 as ts -> ob.effective = (ts) "obx14-effective";
+    } "obx-to-observation";
+  } "observations";
+}
+"""
+
+
+def _fml_structuremap():
+    return FML_MAP
 
 
 CORE_JS = r"""
@@ -832,6 +1080,71 @@ COMMON_LAB_LOINC = {
 }
 
 TX_SERVER = os.environ.get("HEALTHIT_TX_SERVER", "https://tx.fhir.org/r4")
+VSAC_SERVER = "https://cts.nlm.nih.gov/fhir"
+
+
+def _tx_request(url):
+    """Build a tx request; adds UMLS basic auth for VSAC (cts.nlm.nih.gov)."""
+    headers = {"Accept": "application/fhir+json",
+               "User-Agent": "healthit-copilot/" + __version__}
+    host = urllib.parse.urlparse(url).hostname or ""
+    if host.endswith("nlm.nih.gov"):
+        key = os.environ.get("UMLS_API_KEY", "")
+        if not key:
+            return None, ("VSAC (cts.nlm.nih.gov) requires a UMLS API key. "
+                          "Set $UMLS_API_KEY (get one free at "
+                          "https://uts.nlm.nih.gov/uts/profile).")
+        token = base64.b64encode(f"apikey:{key}".encode()).decode()
+        headers["Authorization"] = "Basic " + token
+    return urllib.request.Request(url, headers=headers), None
+
+
+def expand_valueset(url: str = "", oid: str = "", filter_: str = "",
+                    count: int = 20, server: str = "") -> dict:
+    """Expand a ValueSet via $expand.
+
+    - url: canonical ValueSet URL (any tx server).
+    - oid: a VSAC OID like 2.16.840.1.113883.3.464.1003.104.12.1011 —
+      automatically expanded against VSAC (needs $UMLS_API_KEY).
+    - filter_: optional text filter on the expansion.
+    """
+    if oid and not url:
+        url = f"http://cts.nlm.nih.gov/fhir/ValueSet/{oid}"
+        server = server or VSAC_SERVER
+    if not url:
+        return {"error": "Provide a canonical ValueSet url or a VSAC oid."}
+    base = (server or TX_SERVER).rstrip("/")
+
+    q = {"url": url, "count": str(max(1, min(int(count or 20), 100)))}
+    if filter_:
+        q["filter"] = filter_
+    full = base + "/ValueSet/$expand?" + urllib.parse.urlencode(q)
+
+    req, err = _tx_request(full)
+    if err:
+        return {"error": err}
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            body = json.load(resp)
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = e.read().decode()[:500]
+        except Exception:
+            pass
+        return {"error": f"$expand failed: HTTP {e.code}", "server": base,
+                "detail": detail}
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        return {"error": f"Terminology server unreachable: {e}", "server": base}
+
+    exp = body.get("expansion", {})
+    codes = [{"system": c.get("system"), "code": c.get("code"),
+              "display": c.get("display")} for c in exp.get("contains", [])]
+    return {"valueset": url, "server": base,
+            "name": body.get("name", ""),
+            "total": exp.get("total", len(codes)),
+            "returned": len(codes),
+            "codes": codes}
 
 
 def lookup_terminology(code: str = "", system: str = "http://loinc.org",
@@ -843,7 +1156,8 @@ def lookup_terminology(code: str = "", system: str = "http://loinc.org",
     - offline=True (or network failure): built-in crosswalk only.
 
     Set $HEALTHIT_TX_SERVER to use a different terminology server
-    (default https://tx.fhir.org/r4). Never send PHI to a public tx server.
+    (default https://tx.fhir.org/r4); VSAC (cts.nlm.nih.gov) is supported
+    with $UMLS_API_KEY. Never send PHI to a public tx server.
     """
     result = {"query": {"code": code, "system": system, "text": text},
               "source": None, "match": None, "candidates": []}
@@ -866,9 +1180,12 @@ def lookup_terminology(code: str = "", system: str = "http://loinc.org",
     url = (TX_SERVER.rstrip("/") + "/CodeSystem/$lookup?system="
            + urllib.parse.quote(system, safe="") + "&code="
            + urllib.parse.quote(code, safe=""))
-    req = urllib.request.Request(url, headers={
-        "Accept": "application/fhir+json",
-        "User-Agent": "healthit-copilot/" + __version__})
+    req, auth_err = _tx_request(url)
+    if auth_err:
+        result["source"] = "builtin (VSAC auth missing)"
+        result["tx_error"] = auth_err
+        result["match"] = result["candidates"][0] if result["candidates"] else None
+        return result
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             body = json.load(resp)
@@ -919,14 +1236,16 @@ TOOLS = [
                      "properties": {"message": {"type": "string"}},
                      "required": ["message"]}},
     {"name": "generate_engine_code",
-     "description": "Generate an integration-engine transformer (Mirth/NextGen "
-                    "Connect JavaScript or Rhapsody JavaScript) that maps the "
-                    "given ORU^R01 to a FHIR R4 transaction Bundle, mirroring "
-                    "hl7_to_fhir_skeleton's mapping. target: 'mirth'|'rhapsody'.",
+     "description": "Generate transformer code that maps the given ORU^R01 to "
+                    "a FHIR R4 transaction Bundle, mirroring "
+                    "hl7_to_fhir_skeleton. target: 'mirth' (plain-ES5 JS, no "
+                    "E4X), 'rhapsody' (JS filter), or 'fml' (FHIR Mapping "
+                    "Language StructureMap).",
      "inputSchema": {"type": "object",
                      "properties": {"message": {"type": "string"},
                                     "target": {"type": "string",
-                                               "enum": ["mirth", "rhapsody"]}},
+                                               "enum": ["mirth", "rhapsody",
+                                                        "fml"]}},
                      "required": ["message"]}},
     {"name": "validate_fhir_hapi",
      "description": "Full FHIR profile validation via the official HL7 "
@@ -951,6 +1270,19 @@ TOOLS = [
                                     "text": {"type": "string"},
                                     "offline": {"type": "boolean"}},
                      "required": []}},
+    {"name": "expand_valueset",
+     "description": "Expand a FHIR ValueSet via $expand. Pass a canonical "
+                    "'url' (any tx server) or a VSAC 'oid' (requires "
+                    "$UMLS_API_KEY; free at uts.nlm.nih.gov). Optional "
+                    "'filter' text and 'count'. Use to enumerate allowed "
+                    "codes for a bound element.",
+     "inputSchema": {"type": "object",
+                     "properties": {"url": {"type": "string"},
+                                    "oid": {"type": "string"},
+                                    "filter": {"type": "string"},
+                                    "count": {"type": "integer"},
+                                    "server": {"type": "string"}},
+                     "required": []}},
 ]
 
 HANDLERS = {
@@ -964,6 +1296,9 @@ HANDLERS = {
     "lookup_terminology": lambda a: lookup_terminology(
         a.get("code", ""), a.get("system", "http://loinc.org"),
         a.get("text", ""), a.get("offline", False)),
+    "expand_valueset": lambda a: expand_valueset(
+        a.get("url", ""), a.get("oid", ""), a.get("filter", ""),
+        a.get("count", 20), a.get("server", "")),
 }
 
 

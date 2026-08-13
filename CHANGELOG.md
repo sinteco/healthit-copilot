@@ -3,6 +3,28 @@
 All notable changes to HealthIT Copilot. Marketplace installs update through
 version bumps here and in `.claude-plugin/plugin.json`.
 
+## 0.3.0 — 2026-08-13
+
+### Added
+- **ADT skeleton builder** — `hl7_to_fhir_skeleton` now dispatches on MSH-9:
+  ADT messages map to Patient + Encounter (PV1-2 class via HL7 table 0004 →
+  v3-ActCode, PV1-19 visit number, PV1-44/45 period, status
+  in-progress/finished).
+- **ORM skeleton builder** — ORM/OMG/OML messages map to Patient +
+  ServiceRequest (ORC-5 status via table 0038, placer/filler order
+  identifiers, ORC-9 authoredOn, OBR-7 occurrenceDateTime).
+- **FML target for `generate_engine_code`** — third target `"fml"` emits a
+  FHIR Mapping Language StructureMap alongside the Mirth and Rhapsody JS.
+- **`expand_valueset` tool** — FHIR `ValueSet/$expand` with optional text
+  filter and count; VSAC OIDs auto-route to cts.nlm.nih.gov using
+  `$UMLS_API_KEY` (HTTP basic `apikey:KEY`).
+- **Bulk regression harness** (`tools/regress.py`) — replay a folder of
+  `.hl7` messages, record baseline Bundles, diff on later runs with a
+  path-level report; exit 1 on drift, `--update` to accept changes.
+- Encounter and ServiceRequest structural rules in `validate_fhir`.
+- 16 new tests (59 total): ADT/ORM skeletons, FML output, expand_valueset
+  (mocked network + VSAC auth header), regression harness end-to-end.
+
 ## 0.2.1 — 2026-08-13
 
 ### Changed
