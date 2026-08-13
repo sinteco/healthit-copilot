@@ -27,17 +27,23 @@ debugging, and interface-engine (Mirth Connect, Rhapsody) development.
   - `validate_fhir_hapi` — full **profile validation** (US Core & other IGs)
     via the official HL7 validator CLI (needs java + `validator_cli.jar`,
     set `$HAPI_VALIDATOR_JAR`)
-  - `hl7_to_fhir_skeleton` — ORU^R01 → FHIR transaction Bundle
-    (Patient + DiagnosticReport + Observations) with birthDate/gender,
-    OBR-25/OBX-11 status mapping, effective/issued timestamps, reference
-    ranges, interpretations, NTE notes, and an explicit `_gaps` report
+  - `hl7_to_fhir_skeleton` — HL7 v2 → FHIR transaction Bundle, dispatched
+    on MSH-9: **ORU** → Patient + DiagnosticReport + Observations (statuses,
+    timestamps, reference ranges, interpretations, NTE notes), **ADT** →
+    Patient + Encounter (PV1 class/period/visit number), **ORM/OMG/OML** →
+    Patient + ServiceRequest (ORC status, placer/filler identifiers) — all
+    with an explicit `_gaps` report
   - `generate_engine_code` — emit a **Mirth/NextGen Connect** JavaScript
-    transformer or **Rhapsody** JavaScript mapper mirroring the reviewed
-    mapping. Plain ES5 with no E4X, so it runs on classic Rhino-based Mirth
+    transformer, **Rhapsody** JavaScript mapper, or a **FHIR Mapping
+    Language (FML) StructureMap** mirroring the reviewed mapping. The JS is
+    plain ES5 with no E4X, so it runs on classic Rhino-based Mirth
     Connect **and** newer Nashorn/GraalJS-based versions alike
   - `lookup_terminology` — verify codes live against a terminology server
     (**tx.fhir.org** by default, `$HEALTHIT_TX_SERVER` to change) with a
     built-in common-lab LOINC crosswalk for offline use
+  - `expand_valueset` — FHIR `ValueSet/$expand` against any tx server, with
+    **VSAC** support: pass an OID and your `$UMLS_API_KEY` and it routes to
+    cts.nlm.nih.gov automatically
 - **Skills**: `hl7-to-fhir-mapping` (the core workflow, now shipping condensed
   **HL7 v2-to-FHIR IG crosswalk tables** as reference files), `fhir-r4`, `hl7v2`
 - **Commands**: `/map-hl7-to-fhir`, `/validate-fhir`, `/diag-sync`,
@@ -79,6 +85,18 @@ skills auto-activate and route through the deterministic tools.
 python3 -m unittest discover tests -v
 ```
 
+### Bulk regression harness
+
+Replay a folder of HL7 messages and diff the resulting Bundles against a
+recorded baseline — run it after every mapping change:
+
+```
+python3 tools/regress.py samples/ --baseline baselines/   # 1st run records
+python3 tools/regress.py samples/ --baseline baselines/   # later runs diff
+```
+
+Exit code 1 on drift; `--update` accepts intentional changes.
+
 ## Scope & compliance
 
 Built for **test / de-identified** messages: spec work, mapping, and code
@@ -102,13 +120,16 @@ Do not use production PHI. Full policy: [PRIVACY.md](PRIVACY.md).
 - **Terminology server**: `lookup_terminology` uses https://tx.fhir.org/r4 by
   default; point `$HEALTHIT_TX_SERVER` at your own server. Never send PHI to a
   public terminology server.
+- **VSAC value sets**: get a free UMLS API key at
+  https://uts.nlm.nih.gov/uts/signup-login, export `UMLS_API_KEY=...`, and
+  `expand_valueset` can expand any VSAC value set by OID.
 
 ## Roadmap
 
-1. StructureMap / FML output alongside Mirth & Rhapsody codegen.
-2. ADT and ORM skeleton builders (Encounter / ServiceRequest).
-3. VSAC auth support for value-set expansion.
-4. Bulk message regression harness: replay a folder of ORUs and diff Bundles.
+1. HL7 v2.x version-aware field dictionaries (2.3 → 2.8 differences).
+2. CDA/CCD document mapping support.
+3. SIU (scheduling) and MDM (documents) skeleton builders.
+4. Round-trip check: FHIR Bundle → HL7 v2 back-generation for interface tests.
 
 ## Keywords
 

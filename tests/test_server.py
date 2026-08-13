@@ -253,7 +253,8 @@ class TestMCPProtocol(unittest.TestCase):
         self.assertEqual(by_id[1]["result"]["serverInfo"]["name"], "healthit")
         names = [t["name"] for t in by_id[2]["result"]["tools"]]
         self.assertEqual(sorted(names),
-                         ["generate_engine_code", "hl7_to_fhir_skeleton",
+                         ["expand_valueset", "generate_engine_code",
+                          "hl7_to_fhir_skeleton",
                           "lookup_terminology", "parse_hl7v2",
                           "validate_fhir", "validate_fhir_hapi"])
         parsed = json.loads(by_id[3]["result"]["content"][0]["text"])
@@ -431,3 +432,210 @@ class TestTerminology(unittest.TestCase):
             out = server.lookup_terminology(code="6690-2")
         self.assertEqual(out["match"]["display"], "Leukocytes")
         self.assertEqual(out["match"]["confidence"], "tx-server-verified")
+
+
+def _seg(name, fields):
+    """Build an HL7 segment with 1-based field assignments."""
+    parts = [name] + [""] * max(fields)
+    for i, v in fields.items():
+        parts[i] = v
+    return "|".join(parts)
+
+
+ADT = "\r".join([
+    "MSH|^~\\&|REG|HOSP|EMR|HOSP|20240201090000||ADT^A01|MSG002|P|2.5",
+    "PID|1||MRN555^^^HOSP||Smith^John||19751120|M",
+    _seg("PV1", {2: "I", 3: "ICU^101^A", 19: "V2024001",
+                   44: "20240201083000"}),
+])
+
+ORM = "\r".join([
+    "MSH|^~\\&|CPOE|HOSP|LAB|HOSP|20240301100000||ORM^O01|MSG003|P|2.5",
+    "PID|1||MRN777^^^HOSP||Brown^Alice||19900505|F",
+    "ORC|NW|PLC123|FIL456||A||||20240301095500",
+    "OBR|1|PLC123|FIL456|80048^Basic Metabolic Panel^L|||20240301120000",
+])
+
+
+class TestADTSkeleton(unittest.TestCase):
+    def setUp(self):
+        self.bundle = server.hl7_to_fhir_skeleton(ADT)
+        self.resources = {e["resource"]["resourceType"]: e["resource"]
+                          for e in self.bundle["entry"]}
+
+    def test_patient_and_encounter(self):
+        self.assertIn("Patient", self.resources)
+        self.assertIn("Encounter", self.resources)
+        p = self.resources["Patient"]
+        self.assertEqual(p["gender"], "male")
+        self.assertEqual(p["birthDate"], "1975-11-20")
+
+    def test_encounter_details(self):
+        enc = self.resources["Encounter"]
+        self.assertEqual(enc["class"]["code"], "IMP")     # PV1-2 = I
+        self.assertEqual(enc["status"], "in-progress")    # no PV1-45
+        self.assertEqual(enc["identifier"][0]["value"], "V2024001")
+        self.assertEqual(enc["period"]["start"], "2024-02-01T08:30:00Z")
+        self.assertEqual(enc["subject"]["reference"], "urn:uuid:patient-1")
+
+    def test_finished_when_discharged(self):
+        msg = ADT.replace(
+            _seg("PV1", {2: "I", 3: "ICU^101^A", 19: "V2024001",
+                           44: "20240201083000"}),
+            _seg("PV1", {2: "I", 3: "ICU^101^A", 19: "V2024001",
+                           44: "20240201083000", 45: "20240205100000"}))
+        b = server.hl7_to_fhir_skeleton(msg)
+        enc = [e["resource"] for e in b["entry"]
+               if e["resource"]["resourceType"] == "Encounter"][0]
+        self.assertEqual(enc["status"], "finished")
+        self.assertEqual(enc["period"]["end"], "2024-02-05T10:00:00Z")
+
+    def test_validates(self):
+        stripped = json.loads(json.dumps(self.bundle))
+        stripped.pop("_gaps")
+        self.assertEqual(server.validate_fhir(stripped)["errors"], [])
+
+    def test_no_pv1(self):
+        msg = "\r".join(ADT.split("\r")[:2])
+        b = server.hl7_to_fhir_skeleton(msg)
+        self.assertEqual(len(b["entry"]), 1)
+        self.assertTrue(any("No PV1" in g for g in b["_gaps"]))
+
+
+class TestORMSkeleton(unittest.TestCase):
+    def setUp(self):
+        self.bundle = server.hl7_to_fhir_skeleton(ORM)
+        self.resources = {e["resource"]["resourceType"]: e["resource"]
+                          for e in self.bundle["entry"]}
+
+    def test_service_request(self):
+        sr = self.resources["ServiceRequest"]
+        self.assertEqual(sr["status"], "active")         # ORC-5 = A
+        self.assertEqual(sr["intent"], "order")
+        self.assertEqual(sr["code"]["coding"][0]["code"], "80048")
+        self.assertEqual(sr["authoredOn"], "2024-03-01T09:55:00Z")
+        self.assertEqual(sr["occurrenceDateTime"], "2024-03-01T12:00:00Z")
+        ids = {i["type"]["text"]: i["value"] for i in sr["identifier"]}
+        self.assertEqual(ids["Placer Order Number"], "PLC123")
+        self.assertEqual(ids["Filler Order Number"], "FIL456")
+
+    def test_validates(self):
+        stripped = json.loads(json.dumps(self.bundle))
+        stripped.pop("_gaps")
+        self.assertEqual(server.validate_fhir(stripped)["errors"], [])
+
+    def test_orc_status_mapping(self):
+        msg = ORM.replace("|FIL456||A|", "|FIL456||CM|")
+        b = server.hl7_to_fhir_skeleton(msg)
+        sr = [e["resource"] for e in b["entry"]
+              if e["resource"]["resourceType"] == "ServiceRequest"][0]
+        self.assertEqual(sr["status"], "completed")
+
+
+class TestFMLTarget(unittest.TestCase):
+    def test_fml_output(self):
+        out = server.generate_engine_code(ORU, "fml")
+        self.assertEqual(out["target"], "fml")
+        self.assertEqual(out["language"], "fml")
+        code = out["code"]
+        self.assertIn('map "http://healthit.example/StructureMap/ORU-to-Bundle"', code)
+        self.assertIn("group PatientGroup", code)
+        self.assertIn("obx5-nm-quantity", code)
+        self.assertTrue(any("validator_cli.jar" in n for n in out["notes"]))
+
+
+class TestExpandValueset(unittest.TestCase):
+    def test_requires_url_or_oid(self):
+        self.assertIn("error", server.expand_valueset())
+
+    def test_vsac_oid_requires_key(self):
+        old = os.environ.pop("UMLS_API_KEY", None)
+        try:
+            out = server.expand_valueset(oid="2.16.840.1.113883.3.464.1003.104.12.1011")
+            self.assertIn("UMLS API key", out["error"])
+        finally:
+            if old:
+                os.environ["UMLS_API_KEY"] = old
+
+    def test_vsac_auth_header(self):
+        os.environ["UMLS_API_KEY"] = "test-key-123"
+        try:
+            req, err = server._tx_request(
+                "https://cts.nlm.nih.gov/fhir/ValueSet/$expand?url=x")
+            self.assertIsNone(err)
+            auth = req.get_header("Authorization")
+            self.assertTrue(auth.startswith("Basic "))
+            import base64 as b64
+            self.assertEqual(b64.b64decode(auth[6:]).decode(),
+                             "apikey:test-key-123")
+        finally:
+            del os.environ["UMLS_API_KEY"]
+
+    def test_expand_success_mocked(self):
+        body = json.dumps({"resourceType": "ValueSet", "name": "ObsStatus",
+                           "expansion": {"total": 2, "contains": [
+                               {"system": "s", "code": "final", "display": "Final"},
+                               {"system": "s", "code": "amended", "display": "Amended"},
+                           ]}}).encode()
+
+        class FakeResp:
+            def read(self): return body
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        with unittest.mock.patch.object(server.urllib.request, "urlopen",
+                                        return_value=FakeResp()):
+            out = server.expand_valueset(
+                url="http://hl7.org/fhir/ValueSet/observation-status")
+        self.assertEqual(out["total"], 2)
+        self.assertEqual(out["codes"][0]["code"], "final")
+
+    def test_network_failure(self):
+        def boom(*a, **k):
+            raise server.urllib.error.URLError("down")
+        with unittest.mock.patch.object(server.urllib.request, "urlopen", boom):
+            out = server.expand_valueset(url="http://x/vs")
+        self.assertIn("unreachable", out["error"])
+
+
+class TestRegressionHarness(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools"))
+        import regress
+        self.regress = regress
+        self.tmp = tempfile.mkdtemp()
+        self.msgs = os.path.join(self.tmp, "msgs")
+        self.base = os.path.join(self.tmp, "base")
+        os.makedirs(self.msgs)
+        with open(os.path.join(self.msgs, "oru1.hl7"), "w") as fh:
+            fh.write(ORU)
+        with open(os.path.join(self.msgs, "adt1.hl7"), "w") as fh:
+            fh.write(ADT)
+
+    def tearDown(self):
+        import shutil as sh
+        sh.rmtree(self.tmp)
+
+    def test_baseline_then_match_then_drift(self):
+        # first run records baselines
+        rc = self.regress.main([self.msgs, "--baseline", self.base])
+        self.assertEqual(rc, 0)
+        self.assertTrue(os.path.exists(os.path.join(self.base, "oru1.json")))
+        # second run matches
+        rc = self.regress.main([self.msgs, "--baseline", self.base])
+        self.assertEqual(rc, 0)
+        # corrupt a baseline -> drift detected
+        p = os.path.join(self.base, "oru1.json")
+        d = json.load(open(p))
+        d["entry"][0]["resource"]["gender"] = "other"
+        json.dump(d, open(p, "w"))
+        rc = self.regress.main([self.msgs, "--baseline", self.base])
+        self.assertEqual(rc, 1)
+        # --update repairs it
+        rc = self.regress.main([self.msgs, "--baseline", self.base, "--update"])
+        self.assertEqual(rc, 0)
+        rc = self.regress.main([self.msgs, "--baseline", self.base])
+        self.assertEqual(rc, 0)
+
+    def test_bad_dir(self):
+        self.assertEqual(
+            self.regress.main(["/nonexistent-xyz", "--baseline", self.base]), 2)
