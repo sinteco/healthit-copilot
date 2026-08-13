@@ -9,11 +9,20 @@ Tools:
   - validate_fhir        : structural validation of a FHIR R4 resource
   - validate_fhir_hapi   : full profile validation via the HL7 validator CLI
                            (optional: needs java + validator_cli.jar)
-  - hl7_to_fhir_skeleton : build a FHIR Bundle skeleton from an ORU^R01
-  - generate_engine_code : emit a Mirth or Rhapsody JS transformer that mirrors
-                           the skeleton mapping (plain ES5, no E4X)
+  - hl7_to_fhir_skeleton : build a FHIR Bundle from HL7 v2, dispatched on MSH-9
+                           (ORU -> DiagnosticReport/Observations, ADT ->
+                           Encounter, ORM -> ServiceRequest)
+  - generate_engine_code : emit a Mirth or Rhapsody JS transformer (plain ES5,
+                           no E4X) or an FML StructureMap that mirrors the
+                           skeleton mapping
   - lookup_terminology   : verify codes against a terminology server
                            (tx.fhir.org by default) or a built-in lab crosswalk
+  - expand_valueset      : FHIR ValueSet/$expand, incl. VSAC OIDs via
+                           $UMLS_API_KEY
+  - explain_hl7_field    : version-aware HL7 v2 field dictionary (2.3-2.8)
+
+NOTE: keep this tool list in sync with TOOLS below — a unit test asserts
+every registered tool name appears here.
 
 Design notes:
   - stdlib only, so it runs anywhere python3 exists (no pip step to sell).
@@ -36,7 +45,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 
 # ----------------------------- MCP plumbing ---------------------------------
@@ -657,12 +666,16 @@ def generate_engine_code(message: str, target: str = "mirth") -> dict:
 
     Targets:
       - mirth    : Mirth / NextGen Connect JavaScript transformer step
-                   (E4X msg[...] source, channelMap JSON output)
+                   (plain ES5 mapORU core reading connectorMessage raw data,
+                   channelMap JSON output)
       - rhapsody : Rhapsody JavaScript filter/mapper (HL7 message input,
                    FHIR JSON output string)
+      - fml      : FHIR Mapping Language StructureMap (documentation /
+                   $transform-capable engines)
 
-    The generated code mirrors hl7_to_fhir_skeleton's mapping so engine
-    behavior matches what was reviewed in Claude Code.
+    The generated code mirrors hl7_to_fhir_skeleton's mapping (including HL7
+    escape-sequence decoding) so engine behavior matches what was reviewed
+    in Claude Code.
     """
     target = (target or "mirth").lower()
     if target not in ("mirth", "rhapsody", "fml"):
@@ -801,12 +814,50 @@ function mapORU(raw) {
     var FS = lines[0].charAt(3);
     var CS = lines[0].charAt(4) || '^';
     var RS = lines[0].charAt(5) || '~';
+    var ES = lines[0].charAt(6) || '\\';
+    var SC = lines[0].charAt(7) || '&';
+
+    // Decode HL7 escape sequences (\F\ \S\ \T\ \R\ \E\, \Xdd..\, \.br\),
+    // mirroring the Python parser's _unescape.
+    function unesc(s) {
+        s = String(s === undefined ? '' : s);
+        if (s.indexOf(ES) === -1) return s;
+        var simple = {F: FS, S: CS, T: SC, R: RS, E: ES};
+        var out = '', i = 0;
+        while (i < s.length) {
+            var ch = s.charAt(i);
+            if (ch !== ES) { out += ch; i++; continue; }
+            var end = s.indexOf(ES, i + 1);
+            if (end === -1) { out += s.substring(i); break; }
+            var body = s.substring(i + 1, end);
+            if (simple.hasOwnProperty(body)) {
+                out += simple[body];
+            } else if (body.charAt(0) === 'X' && body.length > 2 &&
+                       body.length % 2 === 1 &&
+                       /^[0-9A-Fa-f]+$/.test(body.substring(1))) {
+                for (var h = 1; h < body.length; h += 2)
+                    out += String.fromCharCode(
+                        parseInt(body.substring(h, h + 2), 16));
+            } else if (body === '.br') {
+                out += '\n';
+            } else {
+                out += ES + body + ES;   // unknown sequence; keep verbatim
+            }
+            i = end + 1;
+        }
+        return out;
+    }
 
     // f: 1-based HL7 field on a non-MSH segment line
     function fld(fields, n) { return fields.length > n ? fields[n] : ''; }
     function comp(v, n) {
         var c = String(v === undefined ? '' : v).split(CS);
-        return c.length > n ? c[n] : '';
+        return c.length > n ? unesc(c[n]) : '';
+    }
+    // Decode every component, rejoin with '^' (parity with Python _flat)
+    function flatUnesc(v) {
+        return String(v === undefined ? '' : v)
+            .split(CS).map(unesc).join('^');
     }
 
     function hl7ts2fhir(ts) {
@@ -830,7 +881,7 @@ function mapORU(raw) {
 
     function cc(field) {
         field = String(field === undefined ? '' : field);
-        if (field.indexOf(CS) === -1) return {text: field};
+        if (field.indexOf(CS) === -1) return {text: unesc(field)};
         var code = comp(field, 0), text = comp(field, 1), system = comp(field, 2);
         var out = {};
         if (code) {
@@ -889,7 +940,8 @@ function mapORU(raw) {
                        subject: patientRef};
             var vtype = fld(f, 2), val = fld(f, 5);
             if (vtype === 'NM' || vtype === 'SN') {
-                var m = String(val).replace(new RegExp('\\' + CS, 'g'), ' ')
+                var rawv = flatUnesc(val);
+                var m = rawv.replace(new RegExp('\\^', 'g'), ' ')
                     .trim().match(/^([<>]=?)?\s*(-?\d+(?:\.\d+)?)$/);
                 if (m) {
                     var q = {value: parseFloat(m[2])};
@@ -898,12 +950,12 @@ function mapORU(raw) {
                     if (m[1]) q.comparator = m[1];
                     obs.valueQuantity = q;
                 } else {
-                    obs.valueString = String(val);
+                    obs.valueString = rawv;
                 }
             } else if (vtype === 'CE' || vtype === 'CWE') {
                 obs.valueCodeableConcept = cc(val);
             } else if (val !== '') {
-                obs.valueString = String(val);
+                obs.valueString = flatUnesc(val);
             }
             var rr = comp(fld(f, 7), 0);
             if (rr) obs.referenceRange = [{text: rr}];
@@ -916,7 +968,7 @@ function mapORU(raw) {
             observations.push(obs);
             obsRefs.push({reference: 'urn:uuid:obs-' + n});
         } else if (name === 'NTE' && observations.length) {
-            var note = fld(f, 3);
+            var note = flatUnesc(fld(f, 3));
             if (note) {
                 var last = observations[observations.length - 1];
                 if (!last.note) last.note = [];

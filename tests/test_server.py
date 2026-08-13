@@ -331,6 +331,13 @@ class TestEngineCodegenExecution(unittest.TestCase):
                           "PID|1||M1||Doe^Jane||19800101|F\r"
                           "OBR|1||O1|P^Panel|||20240101120000\r"
                           "OBX|1|SN|X^Test||>^5|mg/dL|||||F"),
+        "escape_sequences": (
+            "MSH|^~\\&|A|B|C|D|202401||ORU^R01|1|P|2.5\r"
+            "PID|1||M1||O\\S\\Brien\\T\\Co^Pat||19800101|F\r"
+            "OBR|1||O1|P^Panel \\F\\ Sub|||20240101120000\r"
+            "OBX|1|ST|X^A \\T\\ B^L||val \\F\\ with \\E\\ esc \\X4142\\"
+            "||||||F\r"
+            "NTE|1||line1\\.br\\line2"),
     }
 
     def _run_js(self, code, shim, raw_msg, post=""):
@@ -688,3 +695,19 @@ class TestFieldDictionary(unittest.TestCase):
         self.assertEqual(out["datatype"], "CM")
         out = server.explain_hl7_field("MSH", 9, "2.4")
         self.assertEqual(out["datatype"], "MSG")
+
+
+class TestDocstringSync(unittest.TestCase):
+    """Every registered tool must be listed in the module docstring
+    (this exact drift has shipped twice)."""
+
+    def test_all_tools_in_module_docstring(self):
+        doc = server.__doc__ or ""
+        for tool in server.TOOLS:
+            self.assertIn(tool["name"], doc,
+                          f"{tool['name']} missing from server.py docstring")
+
+    def test_codegen_docstring_lists_all_targets(self):
+        doc = server.generate_engine_code.__doc__ or ""
+        for target in ("mirth", "rhapsody", "fml"):
+            self.assertIn(target, doc)
