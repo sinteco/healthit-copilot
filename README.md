@@ -80,13 +80,16 @@ All tools live in [`mcp/server.py`](mcp/server.py) (stdlib-only Python).
 | Tool | What it does |
 | --- | --- |
 | `parse_hl7v2` | Spec-correct HL7 v2 parser: honors MSH-1/MSH-2 encoding characters, splits repetitions/components/subcomponents, decodes escape sequences (`\F\`, `\S\`, `\T\`, `\R\`, `\E\`, `\Xdd\`, `\.br\`) |
-| `hl7_to_fhir_skeleton` | HL7 v2 → FHIR transaction Bundle, dispatched on MSH-9. **ORU** → Patient + DiagnosticReport + Observations (statuses, timestamps, reference ranges, interpretations, NTE notes); **ADT** → Patient + Encounter (PV1 class/period/visit number); **ORM/OMG/OML** → Patient + ServiceRequest (ORC status, placer/filler identifiers). Every Bundle ships a `_gaps` report |
+| `hl7_to_fhir_skeleton` | HL7 v2 → FHIR transaction Bundle, dispatched on MSH-9. **ORU** → Patient + DiagnosticReport + Observations (statuses, timestamps, reference ranges, interpretations, NTE notes); **ADT** → Patient + Encounter (PV1 class/period/visit number); **ORM/OMG/OML** → Patient + ServiceRequest (ORC status, placer/filler identifiers); **SIU** → Patient + Appointment (SCH times, status, appointment type); **MDM** → Patient + DocumentReference (TXA metadata, OBX body as base64 attachment). Every Bundle ships a `_gaps` report |
 | `validate_fhir` | Structural FHIR R4 validation: required elements, status value sets, Observation value[x], recursive transaction-Bundle checks |
 | `validate_fhir_hapi` | Full **profile validation** (US Core & other IGs) via the official HL7 validator CLI (needs Java + `validator_cli.jar`; set `$HAPI_VALIDATOR_JAR`) |
 | `generate_engine_code` | Emit a **Mirth/NextGen Connect** JS transformer, **Rhapsody** JS mapper, or **FHIR Mapping Language** StructureMap mirroring the reviewed mapping. The JS is plain ES5 (no E4X), so it runs on Rhino **and** Nashorn/GraalJS engines alike |
 | `lookup_terminology` | Verify codes live against a terminology server (tx.fhir.org by default; `$HEALTHIT_TX_SERVER` to change), with a built-in common-lab LOINC crosswalk for offline use |
 | `expand_valueset` | FHIR `ValueSet/$expand` against any terminology server, with **VSAC** support: pass an OID and your `$UMLS_API_KEY` and it routes to cts.nlm.nih.gov automatically |
 | `explain_hl7_field` | Version-aware HL7 v2 field dictionary (2.3 → 2.8) for MSH/PID/PV1/ORC/OBR/OBX/NTE: field names, datatypes (incl. CE→CWE and TS→DTM changes at 2.7), HL7 tables, added/withdrawn versions, and FHIR mapping hints |
+| `cda_to_fhir` | **CDA/CCD document** → FHIR Bundle: header → Patient, Results/Vitals → Observations, Problem List → Conditions, Medications → MedicationStatements, with unmapped sections reported in `_gaps` |
+| `fhir_to_hl7v2` | The inverse mapping: generate an HL7 v2 message (ORU/ADT/ORM) from a skeleton-shaped FHIR Bundle, for interface testing |
+| `round_trip_check` | Mapping-fidelity verifier: HL7 → FHIR → HL7 → FHIR, then a recursive diff of the two Bundles. Empty diff = the mapping is lossless for everything it claims to map |
 
 ## Commands & skills
 
@@ -159,9 +162,10 @@ avoided entirely with `offline: true`. Full policy:
 
 ## Roadmap
 
-1. CDA/CCD document mapping support
-2. SIU (scheduling) and MDM (documents) skeleton builders
-3. Round-trip check: FHIR Bundle → HL7 v2 back-generation for interface tests
+1. C-CDA section coverage growth (allergies, immunizations, procedures)
+2. SIU/MDM reverse generation for full round-trip coverage
+3. FHIR R4B/R5 target option for the skeleton builders
+4. Batch mode: map and validate a directory of messages in one call
 
 Shipped so far: see [CHANGELOG.md](CHANGELOG.md).
 

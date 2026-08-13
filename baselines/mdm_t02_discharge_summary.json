@@ -1,0 +1,75 @@
+{
+  "_gaps": [
+    "TXA-9/22 authenticator/author not mapped (needs Practitioner resolution)"
+  ],
+  "entry": [
+    {
+      "fullUrl": "urn:uuid:patient-1",
+      "request": {
+        "method": "POST",
+        "url": "Patient"
+      },
+      "resource": {
+        "birthDate": "1968-10-05",
+        "gender": "male",
+        "id": "patient-1",
+        "identifier": [
+          {
+            "value": "MRN200"
+          }
+        ],
+        "name": [
+          {
+            "family": "CHEN",
+            "given": [
+              "WEI"
+            ]
+          }
+        ],
+        "resourceType": "Patient"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:documentreference-1",
+      "request": {
+        "method": "POST",
+        "url": "DocumentReference"
+      },
+      "resource": {
+        "content": [
+          {
+            "attachment": {
+              "contentType": "text/plain",
+              "data": "UGF0aWVudCBhZG1pdHRlZCBmb3IgY29tbXVuaXR5LWFjcXVpcmVkIHBuZXVtb25pYS4KRGlzY2hhcmdlZCBob21lIGluIHN0YWJsZSBjb25kaXRpb24gb24gb3JhbCBhbnRpYmlvdGljcy4="
+            }
+          }
+        ],
+        "date": "2024-04-01T10:30:00Z",
+        "docStatus": "final",
+        "id": "documentreference-1",
+        "identifier": [
+          {
+            "value": "DOC5001"
+          }
+        ],
+        "resourceType": "DocumentReference",
+        "status": "current",
+        "subject": {
+          "reference": "urn:uuid:patient-1"
+        },
+        "type": {
+          "_note": "Map TXA-2 (table 0270) to a LOINC doc type",
+          "coding": [
+            {
+              "code": "DS",
+              "display": "Discharge Summary"
+            }
+          ],
+          "text": "Discharge Summary"
+        }
+      }
+    }
+  ],
+  "resourceType": "Bundle",
+  "type": "transaction"
+}

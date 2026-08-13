@@ -1,0 +1,93 @@
+{
+  "_gaps": [
+    "AIS/AIG/AIL/AIP resources (service, provider, location) not mapped; add participants as needed"
+  ],
+  "entry": [
+    {
+      "fullUrl": "urn:uuid:patient-1",
+      "request": {
+        "method": "POST",
+        "url": "Patient"
+      },
+      "resource": {
+        "birthDate": "1975-11-20",
+        "gender": "female",
+        "id": "patient-1",
+        "identifier": [
+          {
+            "value": "MRN100"
+          }
+        ],
+        "name": [
+          {
+            "family": "GARCIA",
+            "given": [
+              "MARIA"
+            ]
+          }
+        ],
+        "resourceType": "Patient"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:appointment-1",
+      "request": {
+        "method": "POST",
+        "url": "Appointment"
+      },
+      "resource": {
+        "appointmentType": {
+          "coding": [
+            {
+              "code": "ROUTINE",
+              "display": "Routine",
+              "system": "L"
+            }
+          ],
+          "text": "Routine"
+        },
+        "end": "2024-05-01T14:30:00Z",
+        "id": "appointment-1",
+        "identifier": [
+          {
+            "type": {
+              "text": "Placer Appointment ID"
+            },
+            "value": "PL2001"
+          },
+          {
+            "type": {
+              "text": "Filler Appointment ID"
+            },
+            "value": "FL2001"
+          }
+        ],
+        "participant": [
+          {
+            "actor": {
+              "reference": "urn:uuid:patient-1"
+            },
+            "status": "accepted"
+          }
+        ],
+        "reasonCode": [
+          {
+            "coding": [
+              {
+                "code": "FOLLOWUP",
+                "display": "Follow-up visit",
+                "system": "L"
+              }
+            ],
+            "text": "Follow-up visit"
+          }
+        ],
+        "resourceType": "Appointment",
+        "start": "2024-05-01T14:00:00Z",
+        "status": "booked"
+      }
+    }
+  ],
+  "resourceType": "Bundle",
+  "type": "transaction"
+}

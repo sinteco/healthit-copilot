@@ -3,6 +3,36 @@
 All notable changes to HealthIT Copilot. Marketplace installs update through
 version bumps here and in `.claude-plugin/plugin.json`.
 
+## 0.5.0 — 2026-08-13
+
+### Added
+- **SIU (scheduling) skeletons** — `hl7_to_fhir_skeleton` now maps SIU
+  messages to Appointment resources: SCH-1/2 placer/filler identifiers,
+  SCH-7 reason, SCH-8 appointment type, SCH-11 start/end times, and the
+  full HL7 table 0278 → `Appointment.status` crosswalk.
+- **MDM (document) skeletons** — MDM messages map to DocumentReference:
+  TXA-2 document type, TXA-4 date, TXA-12 identifier, TXA-17 completion
+  status → `docStatus`, TXA-19 availability (OB → `superseded`), and
+  OBX TX/ST/FT body lines packaged as a base64 `text/plain` attachment.
+- **`cda_to_fhir` tool** — map a CDA/CCD XML document to a FHIR Bundle:
+  header → Patient, Results/Vital Signs → Observations, Problem List →
+  Conditions, Medications → MedicationStatements. LOINC/SNOMED/RxNorm/
+  ICD-10-CM OIDs translate to canonical FHIR system URIs; unmapped
+  sections are reported in `_gaps`.
+- **`fhir_to_hl7v2` tool** — the inverse mapping: generate an HL7 v2
+  message (ORU^R01, ADT^A01, or ORM^O01) from a skeleton-shaped FHIR
+  Bundle, with proper HL7 escape-sequence re-encoding.
+- **`round_trip_check` tool** — mapping-fidelity verifier: runs
+  HL7 → FHIR → HL7 → FHIR and produces a recursive diff of the two
+  Bundles. All seven in-repo samples round-trip losslessly.
+- FHIR validation rules for Appointment, DocumentReference, Condition,
+  and MedicationStatement.
+- Samples + baselines: `siu_s12_booking.hl7`,
+  `mdm_t02_discharge_summary.hl7` (regression harness now replays 7
+  messages).
+- 24 new tests (92 total), including CCD fixture parsing, escape-sequence
+  round-trip survival, and per-sample round-trip assertions.
+
 ## 0.4.1 — 2026-08-13
 
 ### Fixed

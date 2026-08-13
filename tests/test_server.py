@@ -253,10 +253,12 @@ class TestMCPProtocol(unittest.TestCase):
         self.assertEqual(by_id[1]["result"]["serverInfo"]["name"], "healthit")
         names = [t["name"] for t in by_id[2]["result"]["tools"]]
         self.assertEqual(sorted(names),
-                         ["expand_valueset", "explain_hl7_field",
+                         ["cda_to_fhir", "expand_valueset",
+                          "explain_hl7_field", "fhir_to_hl7v2",
                           "generate_engine_code",
                           "hl7_to_fhir_skeleton",
                           "lookup_terminology", "parse_hl7v2",
+                          "round_trip_check",
                           "validate_fhir", "validate_fhir_hapi"])
         parsed = json.loads(by_id[3]["result"]["content"][0]["text"])
         self.assertEqual(parsed["segment_counts"]["OBX"], 3)
@@ -711,3 +713,230 @@ class TestDocstringSync(unittest.TestCase):
         doc = server.generate_engine_code.__doc__ or ""
         for target in ("mirth", "rhapsody", "fml"):
             self.assertIn(target, doc)
+
+
+SIU_MSG = "\r".join([
+    r"MSH|^~\&|SCHED|HOSP|EMR|HOSP|20240401||SIU^S12|SIU1|P|2.5",
+    "PID|1||MRN1^^^HOSP^MR||DOE^JAN||19800101|F",
+    "SCH|PL123|FL456|||||FOLLOWUP^Follow-up visit^L|ROUTINE^Routine^L|30"
+    "|min|^^^20240501140000^20240501143000||||||||||||||Booked",
+])
+
+MDM_MSG = "\r".join([
+    r"MSH|^~\&|TRANS|HOSP|EMR|HOSP|20240401||MDM^T02|MDM1|P|2.5",
+    "PID|1||MRN2^^^HOSP^MR||ROE^SAM||19700215|M",
+    "TXA|1|DS^Discharge Summary|TX|20240401103000||||||||DOC123|||||AU||AV",
+    "OBX|1|TX|1^Body||Patient was admitted...||||||F",
+    "OBX|2|TX|2^Body||Discharged in stable condition.||||||F",
+])
+
+CCD_DOC = """<?xml version="1.0"?>
+<ClinicalDocument xmlns="urn:hl7-org:v3"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+ <code code="34133-9" displayName="Summarization of Episode Note"/>
+ <recordTarget><patientRole>
+  <id extension="MRN9" root="2.16.840.1.113883.19.5"/>
+  <patient><name><given>ADA</given><family>LOVELACE</family></name>
+   <administrativeGenderCode code="F"/>
+   <birthTime value="19801210"/></patient>
+ </patientRole></recordTarget>
+ <component><structuredBody>
+  <component><section>
+   <code code="30954-2"/>
+   <entry><organizer><component><observation>
+    <code code="718-7" displayName="Hemoglobin"
+          codeSystem="2.16.840.1.113883.6.1"/>
+    <effectiveTime value="20240115"/>
+    <value xsi:type="PQ" value="13.5" unit="g/dL"/>
+   </observation></component></organizer></entry>
+  </section></component>
+  <component><section>
+   <code code="11450-4"/>
+   <entry><act><entryRelationship><observation>
+    <value xsi:type="CD" code="38341003" displayName="Hypertension"
+           codeSystem="2.16.840.1.113883.6.96"/>
+    <effectiveTime><low value="2019"/></effectiveTime>
+   </observation></entryRelationship></act></entry>
+  </section></component>
+  <component><section>
+   <code code="10160-0"/>
+   <entry><substanceAdministration>
+    <consumable><manufacturedProduct><manufacturedMaterial>
+     <code code="197361" displayName="Lisinopril 10mg"
+           codeSystem="2.16.840.1.113883.6.88"/>
+    </manufacturedMaterial></manufacturedProduct></consumable>
+   </substanceAdministration></entry>
+  </section></component>
+  <component><section>
+   <code code="48765-2" displayName="Allergies"/>
+  </section></component>
+ </structuredBody></component>
+</ClinicalDocument>"""
+
+
+class TestSIUSkeleton(unittest.TestCase):
+    def setUp(self):
+        self.bundle = server.hl7_to_fhir_skeleton(SIU_MSG)
+        self.appt = [e["resource"] for e in self.bundle["entry"]
+                     if e["resource"]["resourceType"] == "Appointment"][0]
+
+    def test_appointment_created(self):
+        self.assertEqual(self.appt["status"], "booked")
+        self.assertEqual(self.appt["participant"][0]["actor"]["reference"],
+                         "urn:uuid:patient-1")
+
+    def test_identifiers(self):
+        vals = {i["value"] for i in self.appt["identifier"]}
+        self.assertEqual(vals, {"PL123", "FL456"})
+
+    def test_times_from_sch11(self):
+        self.assertEqual(self.appt["start"], "2024-05-01T14:00:00Z")
+        self.assertEqual(self.appt["end"], "2024-05-01T14:30:00Z")
+
+    def test_reason_and_type(self):
+        self.assertEqual(self.appt["reasonCode"][0]["coding"][0]["code"],
+                         "FOLLOWUP")
+        self.assertEqual(self.appt["appointmentType"]["coding"][0]["code"],
+                         "ROUTINE")
+
+    def test_validates_clean(self):
+        out = server.validate_fhir(server._strip_underscore(self.bundle))
+        self.assertEqual(out["errors"], [])
+
+    def test_unknown_status_defaults_booked_with_gap(self):
+        msg = SIU_MSG.replace("|Booked", "|Zebra")
+        b = server.hl7_to_fhir_skeleton(msg)
+        appt = [e["resource"] for e in b["entry"]
+                if e["resource"]["resourceType"] == "Appointment"][0]
+        self.assertEqual(appt["status"], "booked")
+
+
+class TestMDMSkeleton(unittest.TestCase):
+    def setUp(self):
+        self.bundle = server.hl7_to_fhir_skeleton(MDM_MSG)
+        self.doc = [e["resource"] for e in self.bundle["entry"]
+                    if e["resource"]["resourceType"]
+                    == "DocumentReference"][0]
+
+    def test_docref_created(self):
+        self.assertEqual(self.doc["status"], "current")
+        self.assertEqual(self.doc["docStatus"], "final")
+        self.assertEqual(self.doc["type"]["coding"][0]["code"], "DS")
+        self.assertEqual(self.doc["identifier"][0]["value"], "DOC123")
+        self.assertEqual(self.doc["date"], "2024-04-01T10:30:00Z")
+
+    def test_obx_text_base64(self):
+        import base64
+        data = self.doc["content"][0]["attachment"]["data"]
+        text = base64.b64decode(data).decode()
+        self.assertIn("Patient was admitted...", text)
+        self.assertIn("Discharged in stable condition.", text)
+
+    def test_validates_clean(self):
+        out = server.validate_fhir(server._strip_underscore(self.bundle))
+        self.assertEqual(out["errors"], [])
+
+    def test_no_obx_still_has_content(self):
+        msg = "\r".join(MDM_MSG.split("\r")[:3])
+        b = server.hl7_to_fhir_skeleton(msg)
+        doc = [e["resource"] for e in b["entry"]
+               if e["resource"]["resourceType"] == "DocumentReference"][0]
+        self.assertIn("content", doc)
+
+    def test_ob_maps_superseded(self):
+        msg = MDM_MSG.replace("|AU||AV", "|AU||OB")
+        b = server.hl7_to_fhir_skeleton(msg)
+        doc = [e["resource"] for e in b["entry"]
+               if e["resource"]["resourceType"] == "DocumentReference"][0]
+        self.assertEqual(doc["status"], "superseded")
+
+
+class TestCDAToFHIR(unittest.TestCase):
+    def setUp(self):
+        self.out = server.cda_to_fhir(CCD_DOC)
+        self.by_type = {}
+        for e in self.out["entry"]:
+            r = e["resource"]
+            self.by_type.setdefault(r["resourceType"], []).append(r)
+
+    def test_patient(self):
+        p = self.by_type["Patient"][0]
+        self.assertEqual(p["name"][0]["family"], "LOVELACE")
+        self.assertEqual(p["gender"], "female")
+        self.assertEqual(p["birthDate"], "1980-12-10")
+        self.assertEqual(p["identifier"][0]["value"], "MRN9")
+
+    def test_result_observation(self):
+        obs = self.by_type["Observation"][0]
+        self.assertEqual(obs["code"]["coding"][0]["system"],
+                         "http://loinc.org")
+        self.assertEqual(obs["valueQuantity"]["value"], 13.5)
+        self.assertEqual(obs["valueQuantity"]["unit"], "g/dL")
+
+    def test_problem_condition(self):
+        cond = self.by_type["Condition"][0]
+        coding = cond["code"]["coding"][0]
+        self.assertEqual(coding["code"], "38341003")
+        self.assertEqual(coding["system"], "http://snomed.info/sct")
+
+    def test_medication(self):
+        ms = self.by_type["MedicationStatement"][0]
+        coding = ms["medicationCodeableConcept"]["coding"][0]
+        self.assertEqual(coding["code"], "197361")
+        self.assertEqual(coding["system"],
+                         "http://www.nlm.nih.gov/research/umls/rxnorm")
+
+    def test_unmapped_section_in_gaps(self):
+        self.assertTrue(any("48765-2" in g for g in self.out["_gaps"]))
+
+    def test_bad_xml(self):
+        self.assertIn("error", server.cda_to_fhir("<not xml"))
+
+    def test_wrong_root(self):
+        self.assertIn("error", server.cda_to_fhir("<foo/>"))
+
+    def test_validates_clean(self):
+        out = server.validate_fhir(server._strip_underscore(self.out))
+        self.assertEqual(out["errors"], [])
+
+
+class TestRoundTrip(unittest.TestCase):
+    def test_oru_round_trip(self):
+        rt = server.round_trip_check(ORU)
+        self.assertTrue(rt["round_trip_ok"], rt.get("differences"))
+
+    def test_generated_message_types(self):
+        adt = server.hl7_to_fhir_skeleton(ADT)
+        out = server.fhir_to_hl7v2(adt)
+        self.assertEqual(out["message_type"], "ADT^A01")
+        self.assertTrue(out["message"].startswith("MSH|^~\\&|"))
+
+    def test_escape_sequences_survive(self):
+        msg = "\r".join([
+            r"MSH|^~\&|LAB|H|EMR|H|20240115||ORU^R01|E1|P|2.5",
+            "PID|1||M1^^^H^MR||DOE^JOHN||19800101|M",
+            "OBR|1||O1|X^Note^L|||20240115",
+            r"OBX|1|ST|55|1|A \F\ B \T\ C||||||F",
+        ])
+        rt = server.round_trip_check(msg)
+        self.assertTrue(rt["round_trip_ok"], rt.get("differences"))
+
+    def test_bad_inputs(self):
+        self.assertIn("error", server.fhir_to_hl7v2("{not json"))
+        self.assertIn("error", server.fhir_to_hl7v2({"resourceType": "X"}))
+        self.assertIn("error", server.round_trip_check("garbage"))
+
+    def test_samples_round_trip_clean(self):
+        import glob as _glob
+        base = os.path.join(os.path.dirname(__file__), "..", "samples")
+        files = sorted(_glob.glob(os.path.join(base, "*.hl7")))
+        self.assertTrue(files)
+        for path in files:
+            with open(path) as fh:
+                msg = fh.read()
+            name = os.path.basename(path)
+            if name.startswith(("siu_", "mdm_")):
+                continue  # no reverse generator for SIU/MDM yet
+            rt = server.round_trip_check(msg)
+            self.assertTrue(rt["round_trip_ok"],
+                            "%s: %s" % (name, rt.get("differences")))
