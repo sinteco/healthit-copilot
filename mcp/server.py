@@ -36,7 +36,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 
 # ----------------------------- MCP plumbing ---------------------------------
@@ -1211,6 +1211,212 @@ def lookup_terminology(code: str = "", system: str = "http://loinc.org",
     return result
 
 
+# ------------------------ HL7 field dictionary -------------------------------
+
+_HL7_VERSIONS = ["2.3", "2.3.1", "2.4", "2.5", "2.5.1", "2.6", "2.7",
+                 "2.7.1", "2.8"]
+
+
+def _ver_key(v: str):
+    return tuple(int(p) for p in v.split("."))
+
+
+# Each field: (name, datatype, table, since, withdrawn, note)
+# datatype may be a dict {version: dt} listing the dt in force FROM that
+# version on (e.g. TS -> DTM at 2.7, CE -> CWE at 2.7).
+_DT_TS = {"2.3": "TS", "2.7": "DTM"}
+_DT_CE = {"2.3": "CE", "2.7": "CWE"}
+
+FIELD_DICT = {
+    "MSH": {
+        1: ("Field Separator", "ST", "", "2.3", "",
+            "The separator char itself (usually '|'); quirk: it occupies "
+            "field offset 1, shifting later MSH indexes vs other segments"),
+        2: ("Encoding Characters", "ST", "", "2.3", "",
+            "4 chars ^~\\& through 2.6; a 5th truncation char '#' is "
+            "allowed from 2.7"),
+        3: ("Sending Application", "HD", "0361", "2.3", "", ""),
+        4: ("Sending Facility", "HD", "0362", "2.3", "", ""),
+        5: ("Receiving Application", "HD", "0361", "2.3", "", ""),
+        6: ("Receiving Facility", "HD", "0362", "2.3", "", ""),
+        7: ("Date/Time of Message", _DT_TS, "", "2.3", "",
+            "Optional in 2.3; required from 2.4"),
+        9: ("Message Type", {"2.3": "CM", "2.3.1": "MSG"}, "0076/0003",
+            "2.3", "",
+            "3rd component (message structure, e.g. ORU_R01) added in "
+            "2.3.1; only 2 components exist in 2.3"),
+        10: ("Message Control ID", "ST", "", "2.3", "", ""),
+        11: ("Processing ID", "PT", "0103", "2.3", "", ""),
+        12: ("Version ID", {"2.3": "ID", "2.3.1": "VID"}, "0104",
+             "2.3", "", ""),
+        15: ("Accept Acknowledgment Type", "ID", "0155", "2.3", "",
+             "Drives enhanced-mode ACKs"),
+        16: ("Application Acknowledgment Type", "ID", "0155", "2.3", "", ""),
+        18: ("Character Set", "ID", "0211", "2.3", "", ""),
+    },
+    "PID": {
+        1: ("Set ID - PID", "SI", "", "2.3", "", ""),
+        2: ("Patient ID (External)", "CX", "", "2.3", "2.7",
+            "Withdrawn in 2.7 - carry ALL identifiers as PID-3 repetitions"),
+        3: ("Patient Identifier List", "CX", "0203", "2.3", "",
+            "Repeating; identifier type code is component 5 (CX.5)"),
+        4: ("Alternate Patient ID", "CX", "", "2.3", "2.7",
+            "Withdrawn in 2.7 - use PID-3 repetitions"),
+        5: ("Patient Name", "XPN", "0200", "2.3", "",
+            "family^given^middle^suffix^prefix"),
+        7: ("Date/Time of Birth", _DT_TS, "", "2.3", "", ""),
+        8: ("Administrative Sex", {"2.3": "IS", "2.7": "CWE"}, "0001",
+            "2.3", "", "F/M/O/U/A/N -> FHIR AdministrativeGender"),
+        11: ("Patient Address", "XAD", "", "2.3", "", ""),
+        13: ("Phone Number - Home", "XTN", "", "2.3", "2.7",
+             "Deprecated from 2.7 in favor of PID-40 with use codes"),
+        18: ("Patient Account Number", "CX", "", "2.3", "", ""),
+        19: ("SSN Number - Patient", "ST", "", "2.3", "2.7",
+             "Withdrawn in 2.7 - send as PID-3 repetition with type SS"),
+        29: ("Patient Death Date and Time", _DT_TS, "", "2.3", "", ""),
+        30: ("Patient Death Indicator", "ID", "0136", "2.3", "", ""),
+    },
+    "PV1": {
+        1: ("Set ID - PV1", "SI", "", "2.3", "", ""),
+        2: ("Patient Class", {"2.3": "IS", "2.7": "CWE"}, "0004", "2.3", "",
+            "E/I/O/P/R/B/C/N/U -> FHIR Encounter.class (v3-ActCode)"),
+        3: ("Assigned Patient Location", "PL", "", "2.3", "",
+            "point of care^room^bed^facility"),
+        7: ("Attending Doctor", "XCN", "0010", "2.3", "", ""),
+        8: ("Referring Doctor", "XCN", "0010", "2.3", "", ""),
+        10: ("Hospital Service", {"2.3": "IS", "2.7": "CWE"}, "0069",
+             "2.3", "", ""),
+        14: ("Admit Source", {"2.3": "IS", "2.7": "CWE"}, "0023",
+             "2.3", "", ""),
+        19: ("Visit Number", "CX", "", "2.3", "",
+             "-> FHIR Encounter.identifier"),
+        36: ("Discharge Disposition", {"2.3": "IS", "2.7": "CWE"}, "0112",
+             "2.3", "", ""),
+        44: ("Admit Date/Time", _DT_TS, "", "2.3", "",
+             "-> Encounter.period.start"),
+        45: ("Discharge Date/Time", _DT_TS, "", "2.3", "",
+             "-> Encounter.period.end; repeating through 2.5, single "
+             "from 2.6"),
+    },
+    "ORC": {
+        1: ("Order Control", "ID", "0119", "2.3", "",
+            "NW=new, CA=cancel, SC=status change ..."),
+        2: ("Placer Order Number", "EI", "", "2.3", "", ""),
+        3: ("Filler Order Number", "EI", "", "2.3", "", ""),
+        5: ("Order Status", "ID", "0038", "2.3", "",
+            "-> FHIR ServiceRequest.status"),
+        9: ("Date/Time of Transaction", _DT_TS, "", "2.3", "",
+            "-> ServiceRequest.authoredOn"),
+        12: ("Ordering Provider", "XCN", "0010", "2.3", "", ""),
+    },
+    "OBR": {
+        1: ("Set ID - OBR", "SI", "", "2.3", "", ""),
+        2: ("Placer Order Number", "EI", "", "2.3", "", ""),
+        3: ("Filler Order Number", "EI", "", "2.3", "", ""),
+        4: ("Universal Service Identifier", _DT_CE, "", "2.3", "",
+            "-> DiagnosticReport.code; verify local codes against "
+            "LOINC / order catalog"),
+        7: ("Observation Date/Time", _DT_TS, "", "2.3", "",
+            "-> effectiveDateTime (specimen collection)"),
+        16: ("Ordering Provider", "XCN", "0010", "2.3", "", ""),
+        22: ("Results Rpt/Status Chng - Date/Time", _DT_TS, "", "2.3", "",
+             "-> DiagnosticReport.issued"),
+        25: ("Result Status", "ID", "0123", "2.3", "",
+             "P/F/C/X ... -> DiagnosticReport.status"),
+    },
+    "OBX": {
+        1: ("Set ID - OBX", "SI", "", "2.3", "", ""),
+        2: ("Value Type", "ID", "0125", "2.3", "",
+            "NM/SN/ST/TX/CE|CWE/DT/TM/TS ... governs OBX-5 datatype"),
+        3: ("Observation Identifier", _DT_CE, "", "2.3", "",
+            "-> Observation.code; LN = LOINC"),
+        4: ("Observation Sub-ID", "ST", "", "2.3", "", ""),
+        5: ("Observation Value", "varies", "", "2.3", "",
+            "Datatype set by OBX-2"),
+        6: ("Units", _DT_CE, "", "2.3", "",
+            "Should be UCUM for FHIR Quantity.code"),
+        7: ("References Range", "ST", "", "2.3", "", ""),
+        8: ("Interpretation Codes", {"2.3": "ID", "2.7": "CWE"}, "0078",
+            "2.3", "", "H/L/HH/LL/N/A ... (named 'Abnormal Flags' "
+            "through 2.6)"),
+        11: ("Observation Result Status", "ID", "0085", "2.3", "",
+             "F/P/C/X/D ... -> Observation.status"),
+        14: ("Date/Time of the Observation", _DT_TS, "", "2.3", "", ""),
+        17: ("Observation Method", _DT_CE, "", "2.3", "", ""),
+        19: ("Date/Time of the Analysis", _DT_TS, "", "2.4", "",
+             "Added in 2.4"),
+        23: ("Performing Organization Name", "XON", "", "2.5.1", "",
+             "Added in 2.5.1 (CLIA reporting)"),
+        24: ("Performing Organization Address", "XAD", "", "2.5.1", "",
+             "Added in 2.5.1"),
+        25: ("Performing Organization Medical Director", "XCN", "",
+             "2.5.1", "", "Added in 2.5.1"),
+    },
+    "NTE": {
+        1: ("Set ID - NTE", "SI", "", "2.3", "", ""),
+        2: ("Source of Comment", "ID", "0105", "2.3", "", ""),
+        3: ("Comment", "FT", "", "2.3", "",
+            "-> Observation.note / DiagnosticReport.conclusion"),
+        4: ("Comment Type", _DT_CE, "0364", "2.3.1", "",
+            "Added in 2.3.1"),
+    },
+}
+
+
+def _field_info(seg: str, num: int, spec, version: str) -> dict:
+    name, dt, table, since, withdrawn, note = spec
+    vk = _ver_key(version)
+    if isinstance(dt, dict):
+        eff = max((v for v in dt if _ver_key(v) <= vk), key=_ver_key,
+                  default=min(dt, key=_ver_key))
+        dt_out = dt[eff]
+        dt_hist = {v: dt[v] for v in sorted(dt, key=_ver_key)}
+    else:
+        dt_out, dt_hist = dt, None
+    info = {"field": f"{seg}-{num}", "name": name, "datatype": dt_out,
+            "since": since}
+    if dt_hist and len(dt_hist) > 1:
+        info["datatype_by_version"] = dt_hist
+    if table:
+        info["table"] = table
+    if withdrawn:
+        info["withdrawn"] = withdrawn
+    if note:
+        info["note"] = note
+    if _ver_key(since) > vk:
+        info["valid_in_version"] = False
+        info["warning"] = f"Not present in v{version}; added in v{since}"
+    elif withdrawn and _ver_key(withdrawn) <= vk:
+        info["valid_in_version"] = False
+        info["warning"] = f"Withdrawn as of v{withdrawn}"
+    else:
+        info["valid_in_version"] = True
+    return info
+
+
+def explain_hl7_field(segment: str, field: int = 0,
+                      version: str = "2.5") -> dict:
+    """Version-aware HL7 v2 field dictionary (2.3 through 2.8)."""
+    seg = (segment or "").strip().upper()
+    if version not in _HL7_VERSIONS:
+        return {"error": f"Unknown HL7 version '{version}'. "
+                         f"Supported: {', '.join(_HL7_VERSIONS)}"}
+    if seg not in FIELD_DICT:
+        return {"error": f"Segment '{seg}' not in dictionary. Available: "
+                         f"{', '.join(sorted(FIELD_DICT))}"}
+    fields = FIELD_DICT[seg]
+    if field:
+        if field not in fields:
+            return {"segment": seg, "version": version,
+                    "error": f"{seg}-{field} not in dictionary; documented "
+                             f"fields: {sorted(fields)}"}
+        return {"segment": seg, "version": version,
+                **_field_info(seg, field, fields[field], version)}
+    return {"segment": seg, "version": version,
+            "fields": [_field_info(seg, n, fields[n], version)
+                       for n in sorted(fields)]}
+
+
 # ----------------------------- dispatch -------------------------------------
 
 TOOLS = [
@@ -1283,6 +1489,17 @@ TOOLS = [
                                     "count": {"type": "integer"},
                                     "server": {"type": "string"}},
                      "required": []}},
+    {"name": "explain_hl7_field",
+     "description": "Version-aware HL7 v2 field dictionary (2.3-2.8) for "
+                    "MSH/PID/PV1/ORC/OBR/OBX/NTE: field name, datatype "
+                    "(incl. CE->CWE and TS->DTM changes at 2.7), HL7 table, "
+                    "when the field was added/withdrawn, and FHIR mapping "
+                    "hints. Omit 'field' for a whole-segment summary.",
+     "inputSchema": {"type": "object",
+                     "properties": {"segment": {"type": "string"},
+                                    "field": {"type": "integer"},
+                                    "version": {"type": "string"}},
+                     "required": ["segment"]}},
 ]
 
 HANDLERS = {
@@ -1299,6 +1516,8 @@ HANDLERS = {
     "expand_valueset": lambda a: expand_valueset(
         a.get("url", ""), a.get("oid", ""), a.get("filter", ""),
         a.get("count", 20), a.get("server", "")),
+    "explain_hl7_field": lambda a: explain_hl7_field(
+        a["segment"], a.get("field", 0), a.get("version", "2.5")),
 }
 
 

@@ -86,6 +86,7 @@ All tools live in [`mcp/server.py`](mcp/server.py) (stdlib-only Python).
 | `generate_engine_code` | Emit a **Mirth/NextGen Connect** JS transformer, **Rhapsody** JS mapper, or **FHIR Mapping Language** StructureMap mirroring the reviewed mapping. The JS is plain ES5 (no E4X), so it runs on Rhino **and** Nashorn/GraalJS engines alike |
 | `lookup_terminology` | Verify codes live against a terminology server (tx.fhir.org by default; `$HEALTHIT_TX_SERVER` to change), with a built-in common-lab LOINC crosswalk for offline use |
 | `expand_valueset` | FHIR `ValueSet/$expand` against any terminology server, with **VSAC** support: pass an OID and your `$UMLS_API_KEY` and it routes to cts.nlm.nih.gov automatically |
+| `explain_hl7_field` | Version-aware HL7 v2 field dictionary (2.3 → 2.8) for MSH/PID/PV1/ORC/OBR/OBX/NTE: field names, datatypes (incl. CE→CWE and TS→DTM changes at 2.7), HL7 tables, added/withdrawn versions, and FHIR mapping hints |
 
 ## Commands & skills
 
@@ -130,8 +131,9 @@ CI runs the suite on Python 3.8 and 3.12 for every push and pull request.
 
 ### Bulk regression harness
 
-Replay a folder of HL7 messages and diff the resulting Bundles against a
-recorded baseline — run it after every mapping change:
+The repo ships [`samples/`](samples/) (ORU, ADT, ORM messages) with recorded
+[`baselines/`](baselines/), and CI replays them on every push. To use it on
+your own feed, point it at any folder of `.hl7` messages:
 
 ```
 python3 tools/regress.py samples/ --baseline baselines/   # first run records
@@ -157,10 +159,9 @@ avoided entirely with `offline: true`. Full policy:
 
 ## Roadmap
 
-1. HL7 v2.x version-aware field dictionaries (2.3 → 2.8 differences)
-2. CDA/CCD document mapping support
-3. SIU (scheduling) and MDM (documents) skeleton builders
-4. Round-trip check: FHIR Bundle → HL7 v2 back-generation for interface tests
+1. CDA/CCD document mapping support
+2. SIU (scheduling) and MDM (documents) skeleton builders
+3. Round-trip check: FHIR Bundle → HL7 v2 back-generation for interface tests
 
 Shipped so far: see [CHANGELOG.md](CHANGELOG.md).
 

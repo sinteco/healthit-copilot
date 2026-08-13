@@ -1,0 +1,79 @@
+{
+  "_gaps": [
+    "OBR-4/ORC codes are pass-through, not verified against the order catalog / LOINC",
+    "ORC-12/OBR-16 ordering provider not mapped (needs Practitioner resolution)"
+  ],
+  "entry": [
+    {
+      "fullUrl": "urn:uuid:patient-1",
+      "request": {
+        "method": "POST",
+        "url": "Patient"
+      },
+      "resource": {
+        "birthDate": "1990-05-05",
+        "gender": "female",
+        "id": "patient-1",
+        "identifier": [
+          {
+            "value": "MRN777"
+          }
+        ],
+        "name": [
+          {
+            "family": "BROWN",
+            "given": [
+              "ALICE"
+            ]
+          }
+        ],
+        "resourceType": "Patient"
+      }
+    },
+    {
+      "fullUrl": "urn:uuid:servicerequest-1",
+      "request": {
+        "method": "POST",
+        "url": "ServiceRequest"
+      },
+      "resource": {
+        "authoredOn": "2024-03-01T09:55:00Z",
+        "code": {
+          "_note": "Verify OBR-4 against LOINC / order catalog",
+          "coding": [
+            {
+              "code": "80048",
+              "display": "Basic Metabolic Panel",
+              "system": "L"
+            }
+          ],
+          "text": "Basic Metabolic Panel"
+        },
+        "id": "servicerequest-1",
+        "identifier": [
+          {
+            "type": {
+              "text": "Placer Order Number"
+            },
+            "value": "PLC123"
+          },
+          {
+            "type": {
+              "text": "Filler Order Number"
+            },
+            "value": "FIL456"
+          }
+        ],
+        "intent": "order",
+        "occurrenceDateTime": "2024-03-01T12:00:00Z",
+        "resourceType": "ServiceRequest",
+        "status": "active",
+        "subject": {
+          "reference": "urn:uuid:patient-1"
+        }
+      }
+    }
+  ],
+  "resourceType": "Bundle",
+  "type": "transaction"
+}
