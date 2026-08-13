@@ -6,8 +6,10 @@ Run:  python3 -m unittest discover tests -v
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 import unittest.mock
 
@@ -272,6 +274,16 @@ if __name__ == "__main__":
     unittest.main()
 
 
+def _strip_private(obj):
+    """Remove _-prefixed keys (LLM hints like _gaps/_note) recursively."""
+    if isinstance(obj, dict):
+        return {k: _strip_private(v) for k, v in obj.items()
+                if not k.startswith("_")}
+    if isinstance(obj, list):
+        return [_strip_private(x) for x in obj]
+    return obj
+
+
 class TestEngineCodegen(unittest.TestCase):
     def test_mirth_output(self):
         out = server.generate_engine_code(ORU, "mirth")
@@ -279,25 +291,19 @@ class TestEngineCodegen(unittest.TestCase):
         self.assertEqual(out["message_profile"]["obx_count"], 3)
         code = out["code"]
         self.assertIn("channelMap.put('fhirBundle'", code)
-        self.assertIn("msg['PID']['PID.5']['PID.5.1']", code)
-        self.assertIn("OBR_STATUS", code)
+        self.assertIn("connectorMessage.getRawData()", code)
+        self.assertIn("function mapORU(raw)", code)
+        self.assertNotIn("for each", code)   # no E4X: Nashorn/GraalJS safe
         self.assertTrue(out["notes"])
 
     def test_rhapsody_output(self):
         out = server.generate_engine_code(ORU, "rhapsody")
         self.assertEqual(out["target"], "rhapsody")
         code = out["code"]
-        self.assertIn("function transform(input)", code)
-        self.assertIn("var output = transform(input);", code)
-        self.assertIn("allSegs('OBX')", code)
-
-    def test_no_pid_no_obr(self):
-        msg = ("MSH|^~\\&|A|B|C|D|202401||ORU^R01|1|P|2.5\r"
-               "OBX|1|NM|X^T||5|mg|||||F")
-        out = server.generate_engine_code(msg, "mirth")
-        self.assertFalse(out["message_profile"]["has_pid"])
-        self.assertNotIn("PID.5", out["code"])
-        self.assertNotIn("entry(report)", out["code"])
+        self.assertIn("function mapORU(raw)", code)
+        self.assertIn("input.text()", code)
+        self.assertIn("var output = ", code)
+        self.assertNotIn("for each", code)
 
     def test_bad_target_and_bad_message(self):
         self.assertIn("error", server.generate_engine_code(ORU, "cloverleaf"))
@@ -305,6 +311,58 @@ class TestEngineCodegen(unittest.TestCase):
 
     def test_default_target(self):
         self.assertEqual(server.generate_engine_code(ORU)["target"], "mirth")
+
+
+@unittest.skipUnless(shutil.which("node"), "node not available")
+class TestEngineCodegenExecution(unittest.TestCase):
+    """Execute the generated JS in Node and diff against the Python skeleton.
+
+    This is the test that catches real generation bugs (e.g. engine-specific
+    syntax like E4X) instead of just asserting strings appear.
+    """
+
+    MESSAGES = {
+        "full_oru": ORU,
+        "no_pid_no_obr": ("MSH|^~\\&|A|B|C|D|202401||ORU^R01|1|P|2.5\r"
+                          "OBX|1|NM|X^T||5|mg|||||F"),
+        "sn_comparator": ("MSH|^~\\&|A|B|C|D|202401||ORU^R01|1|P|2.5\r"
+                          "PID|1||M1||Doe^Jane||19800101|F\r"
+                          "OBR|1||O1|P^Panel|||20240101120000\r"
+                          "OBX|1|SN|X^Test||>^5|mg/dL|||||F"),
+    }
+
+    def _run_js(self, code, shim, raw_msg, post=""):
+        js = ("var RAW = " + json.dumps(raw_msg) + ";\n" + shim + "\n"
+              + code + "\n" + post + "\n")
+        with tempfile.NamedTemporaryFile("w", suffix=".js", delete=False) as fh:
+            fh.write(js)
+            path = fh.name
+        try:
+            proc = subprocess.run(["node", path], capture_output=True,
+                                  text=True, timeout=30)
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr)
+            return json.loads(proc.stdout)
+        finally:
+            os.unlink(path)
+
+    def _assert_matches_skeleton(self, target, shim, post=""):
+        for label, msg in self.MESSAGES.items():
+            with self.subTest(message=label):
+                expected = _strip_private(server.hl7_to_fhir_skeleton(msg))
+                code = server.generate_engine_code(msg, target)["code"]
+                actual = self._run_js(code, shim, msg, post)
+                self.assertEqual(actual, expected)
+
+    def test_mirth_js_matches_skeleton(self):
+        shim = ("var connectorMessage = {getRawData: function(){return RAW;}};\n"
+                "var channelMap = {put: function(k, v){console.log(v);}};")
+        self._assert_matches_skeleton("mirth", shim)
+
+    def test_rhapsody_js_matches_skeleton(self):
+        shim = "var input = {text: function(){return RAW;}};"
+        self._assert_matches_skeleton("rhapsody", shim,
+                                      post="console.log(output);")
+
 
 
 class TestHapiValidator(unittest.TestCase):
