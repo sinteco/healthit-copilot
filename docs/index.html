@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>HealthIT Copilot — HL7 v2 ↔ FHIR mapping inside Claude Code</title>
-<meta name="description" content="HealthIT Copilot is a Claude Code plugin for healthcare integration engineers: HL7 v2 to FHIR R4 mapping, FHIR validation, and interface debugging with deterministic tools.">
+<meta name="description" content="HealthIT Copilot is a Claude Code plugin for healthcare integration engineers: HL7 v2 and CDA/CCD to FHIR mapping (R4/R4B/R5), FHIR validation, round-trip checking, and interface debugging with deterministic tools.">
 <meta property="og:title" content="HealthIT Copilot — HL7 v2 ↔ FHIR mapping inside Claude Code">
 <meta property="og:description" content="Deterministic HL7 v2 → FHIR R4 mapping, FHIR validation, and interface debugging for health-IT integration engineers.">
 <meta property="og:type" content="website">
@@ -222,7 +222,7 @@
     <div class="cards">
       <div class="card">
         <code>/map-hl7-to-fhir</code>
-        <p>Convert an HL7 v2 message (ORU, ADT, ORM) into a valid FHIR R4 transaction Bundle, with every unmapped field reported.</p>
+        <p>Convert an HL7 v2 message (ORU, ADT, ORM, SIU, MDM) or a CDA/CCD document into a valid FHIR transaction Bundle — R4, R4B, or R5 — with every unmapped field reported.</p>
       </div>
       <div class="card">
         <code>/validate-fhir</code>
@@ -251,11 +251,13 @@
       <li><span class="mark">[✓]</span><span class="txt">Mirth / Rhapsody transformer codegen <span class="note">— shipped in v0.2, plus FHIR Mapping Language in v0.3</span></span></li>
       <li><span class="mark">[✓]</span><span class="txt">HAPI profile validation (US Core) <span class="note">— shipped in v0.2 via the official HL7 validator CLI</span></span></li>
       <li><span class="mark">[✓]</span><span class="txt">Live LOINC / VSAC terminology lookup <span class="note">— shipped: tx.fhir.org lookup in v0.2, VSAC ValueSet expansion in v0.3</span></span></li>
-      <li><span class="mark">[✓]</span><span class="txt">CDA / CCD document mapping <span class="note">— shipped in v0.5: CCD XML → Patient, Observations, Conditions, MedicationStatements</span></span></li>
+      <li><span class="mark">[✓]</span><span class="txt">CDA / CCD document mapping <span class="note">— shipped in v0.5, expanded in v0.6: results, problems, medications, allergies, immunizations, procedures</span></span></li>
       <li><span class="mark">[✓]</span><span class="txt">SIU / MDM skeleton builders <span class="note">— shipped in v0.5: SIU → Appointment, MDM → DocumentReference</span></span></li>
-      <li><span class="mark">[✓]</span><span class="txt">FHIR → HL7 v2 round-trip checking <span class="note">— shipped in v0.5: HL7 → FHIR → HL7 → FHIR fidelity diff for interface tests</span></span></li>
+      <li><span class="mark">[✓]</span><span class="txt">FHIR → HL7 v2 round-trip checking <span class="note">— shipped in v0.5, full ORU/ADT/ORM/SIU/MDM coverage in v0.6</span></span></li>
+      <li><span class="mark">[✓]</span><span class="txt">FHIR R4B / R5 target option <span class="note">— shipped in v0.6: R5 breaking renames applied automatically</span></span></li>
+      <li><span class="mark">[✓]</span><span class="txt">Batch directory mapping <span class="note">— shipped in v0.6: map + validate a whole folder of .hl7/.xml messages in one call</span></span></li>
     </ul>
-    <p style="margin-top:.9rem">Shipped in v0.6: deeper C-CDA sections (allergies, immunizations, procedures), SIU/MDM reverse generation, FHIR R4B/R5 targets, and batch directory mapping. Next up: FHIR → CCD reverse generation, ACK tooling, and mapping profiles — see the <a href="https://github.com/sinteco/healthit-copilot#roadmap">full roadmap</a>.</p>
+    <p style="margin-top:.9rem">Next up: FHIR → CCD reverse generation, HL7 ACK tooling, X12 eligibility skeletons, and site-specific mapping profiles — see the <a href="https://github.com/sinteco/healthit-copilot#roadmap">full roadmap</a>.</p>
   </div>
 </section>
 
