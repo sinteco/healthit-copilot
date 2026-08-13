@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import unittest
+import unittest.mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "mcp"))
 
@@ -250,7 +251,9 @@ class TestMCPProtocol(unittest.TestCase):
         self.assertEqual(by_id[1]["result"]["serverInfo"]["name"], "healthit")
         names = [t["name"] for t in by_id[2]["result"]["tools"]]
         self.assertEqual(sorted(names),
-                         ["hl7_to_fhir_skeleton", "parse_hl7v2", "validate_fhir"])
+                         ["generate_engine_code", "hl7_to_fhir_skeleton",
+                          "lookup_terminology", "parse_hl7v2",
+                          "validate_fhir", "validate_fhir_hapi"])
         parsed = json.loads(by_id[3]["result"]["content"][0]["text"])
         self.assertEqual(parsed["segment_counts"]["OBX"], 3)
         self.assertIn("error", by_id[4])
@@ -267,3 +270,106 @@ class TestMCPProtocol(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEngineCodegen(unittest.TestCase):
+    def test_mirth_output(self):
+        out = server.generate_engine_code(ORU, "mirth")
+        self.assertEqual(out["target"], "mirth")
+        self.assertEqual(out["message_profile"]["obx_count"], 3)
+        code = out["code"]
+        self.assertIn("channelMap.put('fhirBundle'", code)
+        self.assertIn("msg['PID']['PID.5']['PID.5.1']", code)
+        self.assertIn("OBR_STATUS", code)
+        self.assertTrue(out["notes"])
+
+    def test_rhapsody_output(self):
+        out = server.generate_engine_code(ORU, "rhapsody")
+        self.assertEqual(out["target"], "rhapsody")
+        code = out["code"]
+        self.assertIn("function transform(input)", code)
+        self.assertIn("var output = transform(input);", code)
+        self.assertIn("allSegs('OBX')", code)
+
+    def test_no_pid_no_obr(self):
+        msg = ("MSH|^~\\&|A|B|C|D|202401||ORU^R01|1|P|2.5\r"
+               "OBX|1|NM|X^T||5|mg|||||F")
+        out = server.generate_engine_code(msg, "mirth")
+        self.assertFalse(out["message_profile"]["has_pid"])
+        self.assertNotIn("PID.5", out["code"])
+        self.assertNotIn("entry(report)", out["code"])
+
+    def test_bad_target_and_bad_message(self):
+        self.assertIn("error", server.generate_engine_code(ORU, "cloverleaf"))
+        self.assertIn("error", server.generate_engine_code("garbage", "mirth"))
+
+    def test_default_target(self):
+        self.assertEqual(server.generate_engine_code(ORU)["target"], "mirth")
+
+
+class TestHapiValidator(unittest.TestCase):
+    def test_missing_jar_graceful(self):
+        old = os.environ.pop("HAPI_VALIDATOR_JAR", None)
+        try:
+            with unittest.mock.patch.object(server, "_find_hapi_jar",
+                                            return_value=None):
+                out = server.validate_fhir_hapi({"resourceType": "Patient"})
+            self.assertIn("error", out)
+            self.assertIn("validator_cli.jar", out["error"])
+            self.assertIn("fallback", out)
+        finally:
+            if old:
+                os.environ["HAPI_VALIDATOR_JAR"] = old
+
+    def test_bad_json_string(self):
+        out = server.validate_fhir_hapi("{nope")
+        self.assertFalse(out["valid"])
+
+    def test_missing_java_graceful(self):
+        with unittest.mock.patch.object(server, "_find_hapi_jar",
+                                        return_value="/tmp/fake.jar"), \
+             unittest.mock.patch.object(server.shutil, "which",
+                                        return_value=None):
+            out = server.validate_fhir_hapi({"resourceType": "Patient"})
+        self.assertIn("java", out["error"])
+
+
+class TestTerminology(unittest.TestCase):
+    def test_builtin_text_match(self):
+        out = server.lookup_terminology(text="WBC", offline=True)
+        self.assertEqual(out["match"]["code"], "6690-2")
+        self.assertEqual(out["source"], "builtin")
+
+    def test_builtin_case_insensitive(self):
+        out = server.lookup_terminology(text="glucose", offline=True)
+        self.assertEqual(out["match"]["code"], "2345-7")
+
+    def test_builtin_no_match(self):
+        out = server.lookup_terminology(text="ZZZUNKNOWN", offline=True)
+        self.assertIsNone(out["match"])
+        self.assertIn("note", out)
+
+    def test_network_failure_falls_back(self):
+        def boom(*a, **k):
+            raise server.urllib.error.URLError("no network")
+        with unittest.mock.patch.object(server.urllib.request, "urlopen", boom):
+            out = server.lookup_terminology(code="6690-2",
+                                            system="http://loinc.org",
+                                            text="WBC")
+        self.assertIn("tx_error", out)
+        self.assertEqual(out["match"]["code"], "6690-2")   # builtin fallback
+
+    def test_tx_lookup_success(self):
+        body = json.dumps({"resourceType": "Parameters", "parameter": [
+            {"name": "display", "valueString": "Leukocytes"},
+            {"name": "name", "valueString": "LOINC"}]}).encode()
+
+        class FakeResp:
+            def read(self): return body
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        with unittest.mock.patch.object(server.urllib.request, "urlopen",
+                                        return_value=FakeResp()):
+            out = server.lookup_terminology(code="6690-2")
+        self.assertEqual(out["match"]["display"], "Leukocytes")
+        self.assertEqual(out["match"]["confidence"], "tx-server-verified")

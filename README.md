@@ -23,12 +23,23 @@ debugging, and interface-engine (Mirth Connect, Rhapsody) development.
     sequences (`\F\`, `\S\`, `\T\`, `\R\`, `\E\`, `\Xdd\`, `\.br\`)
   - `validate_fhir` — structural FHIR R4 validation: required elements, status
     value sets, Observation value[x], recursive transaction-Bundle checks
+  - `validate_fhir_hapi` — full **profile validation** (US Core & other IGs)
+    via the official HL7 validator CLI (needs java + `validator_cli.jar`,
+    set `$HAPI_VALIDATOR_JAR`)
   - `hl7_to_fhir_skeleton` — ORU^R01 → FHIR transaction Bundle
     (Patient + DiagnosticReport + Observations) with birthDate/gender,
     OBR-25/OBX-11 status mapping, effective/issued timestamps, reference
     ranges, interpretations, NTE notes, and an explicit `_gaps` report
-- **Skills**: `hl7-to-fhir-mapping` (the core workflow), `fhir-r4`, `hl7v2`
-- **Commands**: `/map-hl7-to-fhir`, `/validate-fhir`, `/diag-sync`
+  - `generate_engine_code` — emit a **Mirth/NextGen Connect** JavaScript
+    transformer or **Rhapsody** JavaScript mapper mirroring the reviewed
+    mapping, ready to paste into your engine
+  - `lookup_terminology` — verify codes live against a terminology server
+    (**tx.fhir.org** by default, `$HEALTHIT_TX_SERVER` to change) with a
+    built-in common-lab LOINC crosswalk for offline use
+- **Skills**: `hl7-to-fhir-mapping` (the core workflow, now shipping condensed
+  **HL7 v2-to-FHIR IG crosswalk tables** as reference files), `fhir-r4`, `hl7v2`
+- **Commands**: `/map-hl7-to-fhir`, `/validate-fhir`, `/diag-sync`,
+  `/gen-engine-code`
 
 ## Installation
 
@@ -71,16 +82,22 @@ python3 -m unittest discover tests -v
 Built for **test / de-identified** messages: spec work, mapping, and code
 generation. Not for production PHI in a consumer tool.
 
+## Optional extras
+
+- **Profile validation**: download the HL7 validator once —
+  `curl -Lo ~/.healthit/validator_cli.jar https://github.com/hapifhir/org.hl7.fhir.core/releases/latest/download/validator_cli.jar`
+  (needs a JRE) — and `validate_fhir_hapi` lights up, including US Core via
+  `igs: ["hl7.fhir.us.core#6.1.0"]`.
+- **Terminology server**: `lookup_terminology` uses https://tx.fhir.org/r4 by
+  default; point `$HEALTHIT_TX_SERVER` at your own server. Never send PHI to a
+  public terminology server.
+
 ## Roadmap
 
-1. Target-engine codegen: emit **Mirth/NextGen Connect** JS transformers and
-   **Rhapsody** mappings — meet engineers in their existing workflow.
-2. Real profile validation: wrap the **HAPI validator CLI** with IG packages
-   (US Core, national profiles) as a `validate_fhir_hapi` tool.
-3. Live terminology: `lookup_terminology` against a tx server (tx.fhir.org /
-   LOINC / VSAC) instead of pass-through codes.
-4. Standard mapping tables: ship the **HL7 v2-to-FHIR IG** crosswalks as
-   reference files behind the mapping skill.
+1. StructureMap / FML output alongside Mirth & Rhapsody codegen.
+2. ADT and ORM skeleton builders (Encounter / ServiceRequest).
+3. VSAC auth support for value-set expansion.
+4. Bulk message regression harness: replay a folder of ORUs and diff Bundles.
 
 ## Keywords
 
